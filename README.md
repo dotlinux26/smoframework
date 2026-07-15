@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.svg" width="72" alt="SMO"><br>
+  <img src="docs/logo.svg" width="120" alt="SMO"><br>
   <b>Secure Mesh Operation</b>
 </p>
 
