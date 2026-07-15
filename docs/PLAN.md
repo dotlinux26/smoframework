@@ -6,6 +6,41 @@ Agreed between @dotlinux26 and @D-O-T-Solutions on 2026-07-16.
 
 ---
 
+## Sprint 3.1 — Stabilization (2026-07-16)
+
+### Scope
+Fix E2E test failures, implement CSR signing, stabilize CLI, create `core/network/` skeleton.
+
+### Completed
+
+| Task | Status |
+|------|--------|
+| Fix `smo-admin sign` — placeholder → real CSR signing | ✅ |
+| Fix CLI `--dry-run` without `--opcode` | ✅ |
+| Fix E2E test expected strings (scope, session, selection) | ✅ |
+| Create `core/network/` skeleton (tcp, udp, bootstrap, transport) | ✅ |
+| Update docs (PLAN.md, ARCHITECTURE.md) | ✅ |
+
+### Issues Fixed
+
+| # | Issue | Root Cause | Fix |
+|---|-------|-----------|-----|
+| 1 | `smo-admin sign` no-op | `cmd/smo-admin/main.cpp` was `return 0` placeholder | Implemented JSON CSR reader + certificate writer |
+| 2 | `smo exec --dry-run` requires `--opcode` | `cmd/smo-cli/main.cpp` L250 hard error | Allow `--dry-run` without opcode → selection-only mode |
+| 3 | Step 9 expected "session" | Output is "Session opened" | Updated expected string |
+| 4 | Step 10 scope test | Ping didn't include scope in output | Added scope field to ping JSON response |
+| 5 | Docker port conflict | Port 7777 used by other services | Changed node-a host port to 27777 |
+| 6 | blake3 SSE2 on ARM | Unconditional SSE/AVX sources | Conditional compilation per arch |
+
+### Remaining (Sprint 4)
+
+- `core/network/` implementation (TCP/UDP transport, bootstrap, heartbeat)
+- NAT traversal (STUN/ICE/TURN)
+- SWIM-inspired gossip membership
+- Real peer table (not local-only discovery)
+
+---
+
 ### Phase 1 — RFCs
 
 | RFC | Title | Content |
