@@ -23,7 +23,7 @@ Sections are ordered by conceptual dependency, not by implementation order. Read
 | Node | A single machine running the SMO runtime, participating in one or more meshes |
 | Mesh | A logical domain of participating SMO nodes, identified by a unique MeshID |
 | MeshID | Deterministic hash derived at mesh creation: Blake3(RootPublicKey \|\| CreatedAt \|\| Random) |
-| Contract | A canonical definition of HOW an intent is fulfilled. Immutable, content-addressed (Blake3), stored in Contract Registry. Three categories: Native, User-defined, Internal. NEVER carries application data |
+| Contract | A canonical definition of HOW an intent is fulfilled. Immutable, content-addressed (Blake3), stored in Contract Registry. Four categories: Kernel, Native, Mesh, Private. NEVER carries application data |
 | ContractID | Blake3(utf8(canonical_json)) — 64 hex chars. Content-addressed identifier for a contract definition |
 | Contract Registry | Immutable, append-only, Blake3-addressed store of contract definitions. Git-like, not Docker-like |
 | Contract Factory | Resolves an Intent to a ContractID by querying the Registry and Opcode Registry |
@@ -31,11 +31,14 @@ Sections are ordered by conceptual dependency, not by implementation order. Read
 | Native Contract | Runtime-builtin contract template registered at startup. Cannot be published/deprecated by users |
 | User-defined Contract | Published by a mesh participant via Contract Registry. Signed, versioned, auditable |
 | Internal Contract | Runtime-only contract, never user-invokable. Created and destroyed within a single session |
+| Kernel Contract | System-level trusted contract. Executor runs inline, no sandbox. Opcode range 0x00–0x0F |
 | Requester | The node that proposes a contract |
 | Responder | The node that receives and executes (or rejects) a contract. Has final decision authority |
 | Witness | An independent third node that attests to the contract's existence and integrity. Does not execute |
 | Intent | What the user wants to accomplish. Expressed as opcode + targets + parameters. Separate from Contract |
-| Compiler | Node-local component that transforms Contract Definition + Parameters + Node Environment → executable DAG |
+| Compiler | Node-local component that transforms Contract Definition + Parameters + Node Environment → SMIR → ExecutionGraph (DAG). 6-stage pipeline: Parser → Semantic Validator → Planner → Builder → Optimizer → Final Validator |
+| SMIR | SMO Intermediate Representation — canonical IR format that decouples input formats (JSON, DSL, YAML) from the DAG pipeline |
+| Contract ABI | Canonical interface description: input/output schemas, capability mask, opcode deps, ABI Hash, Semantic Hash, version bounds |
 | DAG Cache | Local cache keyed by (ContractID, env_fingerprint). Avoids recompilation on repeated execution |
 | Capability | A runtime-validated, session-scoped permission. NOT a static role |
 | Opcode | The operation type. Hierarchical namespace: DISCOVERY, CONTROL, EXECUTION, DATA |
@@ -1543,13 +1546,14 @@ User (CLI/GUI/REST/SDK)
 
 | Category | Nature | Storage | Lifecycle | Examples |
 |---|---|---|---|---|
+| **Kernel** | System-level, trusted. Executor runs these inline — no sandbox | Built into runtime binary | Fixed per SMO version; updated only via runtime upgrade | `ping`, `whoami`, `session_open`, `session_close`, `discover`, `node.info`, `identity.rotate` |
 | **Native** | Runtime-builtin template | Registered at startup from `contract/registry/native.cpp` | Fixed for SMO version; updated only via runtime upgrade | `ls`, `put`, `get`, `exec`, `quarantine` |
-| **User-defined** | Published by a mesh participant | Contract Registry (local DB, pulled from peers) | Draft → Publish → Sync → Compile → Execute → Deprecate | Incident playbooks, compliance checks, custom workflows |
-| **Internal** | Runtime-only, never user-invokable | Not in Registry; instantiated ad-hoc | Created and destroyed within a single session | Session teardown, trust recalculation, heartbeat handler |
+| **Mesh** | Published by a mesh participant | Contract Registry (local DB, pulled from peers) | Draft → Publish → Sync → Compile → Execute → Deprecate | Incident playbooks, compliance checks, custom workflows |
+| **Private** | User-local, never shared | Local store only | Created, executed, deleted within local scope | Personal automation, test contracts |
 
 ### 10.3 Contract Definition Schema
 
-Every contract (all three categories) is a **canonical JSON object**:
+Every contract (all four categories) is a **canonical JSON object**:
 
 ```json
 {
@@ -1574,6 +1578,17 @@ Every contract (all three categories) is a **canonical JSON object**:
   },
   "capabilities_required": {
     "filesystem_read": 1
+  },
+  "abi": {
+    "abi_version": 1,
+    "input_schema": { "type": "object", "properties": { "path": { "type": "string" }, "recursive": { "type": "boolean" } } },
+    "output_schema": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "size": { "type": "integer" } } } },
+    "capability_mask": "00000001",
+    "opcode_dependencies": [],
+    "abi_hash": "abc123...",
+    "semantic_hash": "def456...",
+    "min_runtime_version": "3.0.0",
+    "max_runtime_version": "3.255.255"
   },
   "compiler_hints": {
     "max_parallelism": 1,
@@ -1773,6 +1788,72 @@ The post-execution record (stored by all three participants) uses the same schem
 
 If an opcode operates on large data, the data is transferred through a separate **Data Protocol** channel (§VI.1). The contract references data only by hash.
 
+### 10.11 Contract ABI
+
+Every contract carries an **ABI** (Application Binary Interface) that describes
+its inputs, outputs, capabilities, dependencies, and version bounds. The ABI
+is a canonical JSON object with a content-addressed **ABI Hash** enabling
+runtime verification without re-parsing the contract body.
+
+#### ABI Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `abi_version` | uint8 | yes | ABI format version. Current = 1 |
+| `input_schema` | Schema | yes | Input parameter schema (JSON Schema subset) |
+| `output_schema` | Schema | yes | Output result schema (JSON Schema subset) |
+| `capability_mask` | string | yes | Hex-encoded 64-bit capability bitmask |
+| `opcode_dependencies` | string[] | yes | Opcodes this contract invokes |
+| `abi_hash` | string | yes | BLAKE3(canonical ABI JSON excluding abi_hash and semantic_hash) |
+| `semantic_hash` | string | yes | BLAKE3(abi_hash + canonical contract body) |
+| `min_runtime_version` | semver | yes | Minimum SMO runtime version required |
+| `max_runtime_version` | semver | yes | Maximum SMO runtime version allowed |
+
+#### Hash Linkage
+
+```
+ContractID  = BLAKE3(canonical_json(full_contract))
+    ↕  (verifies contract body integrity)
+Semantic Hash = BLAKE3(abi_hash || body_json)
+    ↕  (verifies ABI + body consistency)
+ABI Hash    = BLAKE3(canonical_json(abi_fields))
+    ↕  (verifies interface compatibility)
+Runtime check: ABI Hash match → no re-parse needed
+```
+
+If the ABI Hash matches a cached DAG, the runtime skips re-validation.
+
+#### ABI Registry
+
+```cpp
+class AbiRegistry {
+public:
+    void register_abi(const ContractABI& abi);
+    std::optional<ContractABI> get_abi(const ContractID& id) const;
+    bool verify_compatibility(
+        const ContractID& id, const ExecutionContext& ctx) const;
+    Hash256 compute_abi_hash(const ContractABI& abi) const;
+};
+```
+
+Populated at registration time (kernel/native), publish time (mesh/private),
+and on registry sync (from remote peers).
+
+#### Version Compatibility
+
+| Runtime ABI | Contract ABI | Result |
+|-------------|--------------|--------|
+| 1 | 1 | Compatible |
+| 1 | 2 | Incompatible — reject |
+| 2 | 1 | Compatible (backward compatible) |
+
+`min_runtime_version` and `max_runtime_version` are checked at dispatch time:
+
+```
+if (runtime_version < abi.min_runtime_version) reject;
+if (runtime_version > abi.max_runtime_version) reject;
+```
+
 ---
 
 ## XI. WITNESS PROTOCOL
@@ -1899,21 +1980,45 @@ The local trust computation is always authoritative.
 
 ### 13.2 Compiler Pipeline
 
+The compiler is a 6-stage pipeline that transforms a contract definition into
+an immutable ExecutionGraph (DAG). A **SMIR** (SMO Intermediate Representation)
+layer decouples input formats from the downstream pipeline, enabling future
+frontends (DSL, YAML, visual workflow, AI generator) to reuse the same
+optimizer, planner, and executor.
+
 ```
-INTENT SOURCE
+CONTRACT JSON / DSL / YAML / AI-GEN
     ↓
-PARSE                  →  structured AST
+PARSER                 →  JSON → AST (abstract syntax tree)
     ↓
-CAPABILITY RESOLUTION  →  capability requirement binding
+  ┌─────┐
+  │ AST │             Opcodes, operands, edges, conditions
+  └─────┘
     ↓
-NODE PLANNING          →  target node(s) assignment
+  ┌──────┐
+  │ SMIR │             SMO Intermediate Representation — canonical IR
+  └──────┘             (opcodes + basic blocks + operands, format-agnostic)
     ↓
-DAG GENERATION         →  dependency graph construction
+SEMANTIC VALIDATOR     →  Pass 1: ABI hash match, capability req, opcode dep check
     ↓
-OPTIMIZATION           →  (future) graph-level optimizations
+PLANNER                →  Target node selection, shard mapping
+    ↓
+BUILDER                →  SMIR → ExecutionGraph (DAG construction)
+    ↓
+OPTIMIZER              →  Prune redundant nodes, merge read-only siblings,
+                          constant folding
+    ↓
+FINAL VALIDATOR        →  Pass 2: acyclic check, max depth/width,
+                          node reachability
     ↓
 EXECUTION DAG          →  immutable output
 ```
+
+**Key rules:**
+- Compiler does NOT depend on Runtime.
+- Executor does NOT depend on contract category.
+- DAG is immutable once produced (§13.3).
+- Cache keyed by `ContractID + env_fingerprint` (§13.5).
 
 ### 13.3 DAG Immutability Rule
 
@@ -2041,6 +2146,52 @@ mesh "SOC-Production": max_concurrent = 10, cpu_quota = 4 cores
 node "server-01":      max_concurrent = 4,  cpu_quota = 2 cores
 ```
 When a quota is exceeded, new contracts are queued or REJECTED based on priority.
+
+### 13.7 Runtime Interface
+
+The runtime exposes a **single entry point** for all contract execution:
+
+```cpp
+struct ExecutionResult {
+    bool success;
+    ContractID contract_id;
+    Hash256 dag_hash;           // hash of the executed DAG
+    std::string output_json;    // contract output (if any)
+    uint64_t started_at;        // Unix ns
+    uint64_t completed_at;      // Unix ns
+    std::vector<Error> errors;  // per-task errors (if any)
+};
+
+struct ExecutionContext {
+    SessionID session_id;
+    NodeID requester;
+    CapabilityMask granted_caps;
+    uint64_t deadline_ns;
+    uint32_t max_concurrency;
+};
+
+class Runtime {
+public:
+    // The ONLY entry point for contract execution.
+    // Runtime does NOT know contract category (Kernel/Native/Mesh/Private).
+    ExecutionResult execute(
+        const ContractID& id,
+        const ExecutionContext& ctx
+    );
+};
+```
+
+**Execution flow:**
+1. Resolve `ContractID` via `ContractRegistry` → get `ContractDefinition`
+2. Check DAG cache (keyed by `ContractID + env_fingerprint`)
+3. On cache miss: call `Compiler::compile()` → cache DAG in `dag_store`
+4. Dispatch each DAG task node through `Executor`
+5. Return `ExecutionResult`
+
+The executor is **ignorant** of contract category — it receives a compiled
+`ExecutionGraph` and a `Session`, executes each task node, and returns results.
+Category affects sandbox policy only (Kernel = inline, Native = capability gate,
+Mesh/Private = full sandbox + audit).
 
 ---
 
@@ -2784,27 +2935,59 @@ ContractRegistry + OpcodeRegistry + ContractFactory + Intent extensions
 - **Hash Suite architecture:** `core/crypto/fwd.hpp` — HashSuite enum, `core/crypto/suite.hpp` — HashSuiteID constants, `core/crypto/impl.hpp` — PerformanceHashImpl, SPEC.md §16.6 update with Hash Suite taxonomy
 - Tests: ContractID computation, registry CRUD, opcode registration, factory resolution
 
-#### Sprint 2.6 — Compiler
+#### Sprint 2.6 — Contract ABI (RFC 0026)
 
 ```
-contract/compiler/ + DAG cache
+core/contract/contract_abi.hpp + ContractABI struct + ABI Hash
 ```
-- `contract/compiler/compiler.hpp` — Compiler class with compile() and cache_get()
-- `NodeEnvironment` struct with fingerprint computation
-- `contract/compiler/dag_cache.hpp` — DAG cache backed by dag_store
-- Compiler transforms ContractDefinition + parameters + env → DAG
-- Native contracts produce trivial single-node DAGs with direct handler dispatch
-- Tests: compile native contract, cache hit/miss, env fingerprint change invalidates cache
+- RFC 0026: Contract ABI Specification
+- `core/contract/contract_abi.hpp/.cpp` — ContractABI struct, Schema, AbiRegistry
+- `abi_hash` = BLAKE3(canonical ABI JSON)
+- `semantic_hash` = BLAKE3(abi_hash + contract body)
+- Runtime checks ABI Hash match → skip re-parse
+- SDK code generation from ABI (future)
 
-#### Sprint 2.7 — Executor Integration
+#### Sprint 2.7 — Compiler Pipeline
 
 ```
-Executor + Scheduler integration with new contract pipeline
+Parser → AST → SMIR → Semantic Validator → Planner → Builder → Optimizer → Final Validator → DAG
 ```
-- Executor calls Compiler instead of parsing raw Intent
-- Scheduler works with DAG from Compiler (same DAG format, new source)
-- Contract record stores ContractID + IntentID (backward-compatible with existing execution FSM)
-- End-to-end test: Intent → Factory → Registry → Compiler → DAG → Executor
+- RFC 0025: Contract Runtime Architecture
+- `compiler/ast/ast.hpp/.cpp` — Contract AST node types
+- `compiler/smir/smir.hpp/.cpp` — SMIR opcodes, operands, basic blocks, AST → SMIR lowering
+- `compiler/parser/parser.hpp/.cpp` — JSON → AST (real impl, replaces stub)
+- `compiler/validator/semantic.hpp/.cpp` — Pass 1: ABI hash match, capability check, opcode dep check
+- `compiler/validator/final.hpp/.cpp` — Pass 2: acyclic check, max depth/width, node reachability
+- `compiler/planner/planner.hpp/.cpp` — Target node selection, shard mapping (replaces stub)
+- `compiler/graph/builder.hpp/.cpp` — SMIR → ExecutionGraph
+- `compiler/optimizer/optimizer.hpp/.cpp` — Prune, merge reads, constant fold (replaces stub)
+- `compiler/compiler.cpp` — Concrete Compiler class tying all stages
+- Tests: Parser round-trip, SMIR lowering, Semantic/Final Validator, full pipeline
+
+#### Sprint 2.8 — Executor + Kernel Contracts
+
+```
+Runtime::execute(ContractID, ExecutionContext) + polymorphic kernel contracts
+```
+- `runtime/executor/executor.hpp/.cpp` — resolve ContractID → DAG cache → execute DAG
+- `runtime/sandbox/sandbox.hpp/.cpp` — Seccomp/namespace isolation per task node
+- `runtime/workerpool/workerpool.hpp/.cpp` — Thread pool with task-level parallel dispatch
+- `runtime/runtime.hpp/.cpp` — `ExecutionResult execute(const ContractID&, const ExecutionContext&)`
+- Kernel contracts registered polymorphically (zero opcode hardcode):
+  `ping`, `whoami`, `session_open`, `session_close`, `discover`, `node.info`, `identity.rotate`
+- `core/contract/contract_interface.hpp` — Abstract Contract interface
+- Contract category gating: Kernel = inline, Native = capability gate, Mesh/Private = full sandbox
+- Tests: Executor dispatch via Runtime::execute(), kernel contract execution
+
+#### Sprint 2.9 — Discovery Completion
+
+```
+handle_ping/handle_pong → real response + gossip piggyback + seed fallback
+```
+- `core/discovery/discovery.cpp` — handle_ping/handle_pong from no-op to real response
+- `core/discovery/gossip.hpp/.cpp` — SWIM gossip piggyback membership updates on ping/pong
+- Seed priority fallback (DNS → hardcoded → seed list)
+- Tests: Ping/pong round-trip, gossip propagation
 
 ### Stage 3 — Multi-Node
 
@@ -2814,13 +2997,12 @@ multi-node propagation + witness + discovery engine
 - Multi-node contract flow
 - Basic witness protocol
 - Control protocol over TCP
-- Discovery Engine: SWIM gossip, bootstrap, passive discovery, leave detection
 - Routing Layer: Peer Record, multi-address, basic path selection
 
 ### Stage 4 — DAG
 
 ```
-compiler + DAG scheduler + runtime policies
+DAG scheduler + runtime policies
 ```
 - Intent → DAG compiler
 - DAG-aware scheduler
