@@ -19,7 +19,7 @@ struct Intent {
     std::string       requester;
     std::string       responder;
     std::string       witness;
-    std::string       scope;            // "single", "mesh"
+    std::string       scope;            // "single" (unicast, 1-to-1) or "mesh" (meshcast, 1-to-all)
     std::vector<std::string> targets;
     double            trust_min{0.0};
     int32_t           parallelism{1};

@@ -1757,6 +1757,57 @@ User: smo exec ls --path /tmp
 4. Executor runs DAG (see §XIII)
 ```
 
+### 10.7.1 Dispatch Scope
+
+Every Intent carries a `scope` field with exactly two values:
+
+| Scope | Alias | Meaning |
+|-------|-------|---------|
+| `"single"` | **Unicast** | Contract is executed by exactly **one** responder. The responder is specified in `Intent.targets` (first target). Capability check is **peer-specific**: the requester must hold a capability grant from that specific responder node. |
+| `"mesh"` | **Meshcast** | Contract is **broadcast** to all nodes in the mesh (or a subset via `Intent.targets`). Each receiving node independently evaluates the contract. Capability check is **mesh-wide**: the requester must hold a capability granted by the mesh Authority (encoded in the Membership Certificate or governance log). |
+
+**Capability scope vs. dispatch scope:**
+
+```
+Capability grant
+    │
+    ├── "scope":"single"  →  Grant from Node B to Node A.
+    │                        Node A invokes contract → Node B validates
+    │                        Node A's capability grant signed by Node B.
+    │
+    └── "scope":"mesh"    →  Grant from Authority to Node A.
+                             Node A invokes contract → every node validates
+                             Node A's capability in the certificate chain.
+```
+
+**Examples:**
+
+| Contract | Scope | Rationale |
+|----------|-------|-----------|
+| `ls`, `get`, `put`, `exec` | `"single"` | Peer-to-peer file operation. Node A asks Node B to list a directory. |
+| `quarantine` | `"mesh"` | Mesh-wide action. All nodes must reject traffic from the quarantined node. |
+| `session_open` | `"single"` | Pairwise session establishment between two nodes. |
+| `discover` | `"mesh"` | Every node returns its peer list to build the requester's mesh topology. |
+| `identity.rotate` | `"mesh"` | All nodes must update the rotated public key in their trust store. |
+| governance proposal | `"mesh"` | All Authority nodes must see and vote on the proposal. |
+
+**Runtime enforcement:**
+
+```
+Runtime::execute(ContractID, ExecutionContext)
+    │
+    ├── ctx.scope == "single"
+    │   └── validate_capability(requester, responder, opcode)
+    │       └── fails if requester has no capability grant from this responder
+    │
+    └── ctx.scope == "mesh"
+        └── validate_mesh_capability(requester, opcode)
+            └── fails if requester's certificate / governance log
+                does not authorize this opcode mesh-wide
+```
+
+The Executor is **ignorant** of scope — it receives a compiled DAG and an `ExecutionContext`. The scope check happens **before** dispatch, in the Runtime/Policy layer.
+
 ### 10.8 Signature Scheme (User-Defined Contracts)
 
 1. Author computes `ContractID = Blake3(utf8(canonical_json))`.
@@ -2165,6 +2216,8 @@ struct ExecutionResult {
 struct ExecutionContext {
     SessionID session_id;
     NodeID requester;
+    NodeID responder;
+    std::string scope;          // "single" (unicast, 1-to-1) or "mesh" (meshcast, 1-to-all)
     CapabilityMask granted_caps;
     uint64_t deadline_ns;
     uint32_t max_concurrency;

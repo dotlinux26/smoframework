@@ -17,6 +17,8 @@ enum class ContractCategory : uint8_t {
 struct ExecutionContext {
     std::string session_id;
     std::string requester_node_id;
+    std::string responder_node_id;
+    std::string scope;              // "single" (unicast) or "mesh" (meshcast)
     std::string granted_capabilities;
     uint64_t    deadline_ns{0};
     uint32_t    max_concurrency{1};
