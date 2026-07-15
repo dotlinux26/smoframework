@@ -5,7 +5,8 @@
 #include <vector>
 #include <span>
 
-#include "core/opcode/opcode.h"
+#include "../../core/errors/error.hpp"
+#include "../../core/opcode/opcode.h"
 
 namespace smo {
 
@@ -37,11 +38,12 @@ struct Packet {
 
 // Parse a wire buffer into a Packet without copying the payload.
 // Returns a Packet whose payload span references the input buffer.
-Packet packet_from_buffer(std::span<const uint8_t> wire);
+// Returns Protocol error on malformed input.
+Result<Packet> packet_from_buffer(std::span<const uint8_t> wire);
 
 // Serialize a packet into a writer callback.
 // Format: header | session_id | intent_id | opcode | timestamp | nonce
 //         | payload_len | payload | signature
-void packet_to_buffer(const Packet& pkt, std::vector<uint8_t>& out);
+Result<void> packet_to_buffer(const Packet& pkt, std::vector<uint8_t>& out);
 
 } // namespace smo

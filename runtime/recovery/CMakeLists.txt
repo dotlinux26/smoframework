@@ -1,0 +1,2 @@
+add_library(smo_runtime_recovery INTERFACE)
+target_include_directories(smo_runtime_recovery INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

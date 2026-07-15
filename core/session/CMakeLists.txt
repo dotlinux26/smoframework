@@ -1,3 +1,7 @@
+target_sources(smo_core PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/session.cpp
+)
+
 target_sources(smo_core INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}/session.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/session.hpp
 )

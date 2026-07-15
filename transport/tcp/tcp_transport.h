@@ -2,7 +2,7 @@
 
 #include "transport/transport.h"
 
-namespace smo {
+namespace smo::hl {
 
 class TcpTransport final : public Transport {
 public:
@@ -27,4 +27,5 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace smo
+} // namespace smo::hl
+

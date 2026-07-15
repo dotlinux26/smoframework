@@ -1,0 +1,2 @@
+add_library(smo_tests_adversarial INTERFACE)
+target_include_directories(smo_tests_adversarial INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

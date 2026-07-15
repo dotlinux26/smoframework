@@ -1,0 +1,2 @@
+add_library(smo_tests_replay INTERFACE)
+target_include_directories(smo_tests_replay INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

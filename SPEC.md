@@ -23,11 +23,20 @@ Sections are ordered by conceptual dependency, not by implementation order. Read
 | Node | A single machine running the SMO runtime, participating in one or more meshes |
 | Mesh | A logical domain of participating SMO nodes, identified by a unique MeshID |
 | MeshID | Deterministic hash derived at mesh creation: Blake3(RootPublicKey \|\| CreatedAt \|\| Random) |
-| Contract | A metadata-only document that describes execution intent and constraints. NEVER contains application data |
+| Contract | A canonical definition of HOW an intent is fulfilled. Immutable, content-addressed (Blake3), stored in Contract Registry. Three categories: Native, User-defined, Internal. NEVER carries application data |
+| ContractID | Blake3(utf8(canonical_json)) — 64 hex chars. Content-addressed identifier for a contract definition |
+| Contract Registry | Immutable, append-only, Blake3-addressed store of contract definitions. Git-like, not Docker-like |
+| Contract Factory | Resolves an Intent to a ContractID by querying the Registry and Opcode Registry |
+| Opcode Registry | Syscall-table-like registry mapping OpcodeID → handler metadata, capability mask, and arch support |
+| Native Contract | Runtime-builtin contract template registered at startup. Cannot be published/deprecated by users |
+| User-defined Contract | Published by a mesh participant via Contract Registry. Signed, versioned, auditable |
+| Internal Contract | Runtime-only contract, never user-invokable. Created and destroyed within a single session |
 | Requester | The node that proposes a contract |
 | Responder | The node that receives and executes (or rejects) a contract. Has final decision authority |
 | Witness | An independent third node that attests to the contract's existence and integrity. Does not execute |
-| Intent | What the requester wants to accomplish. Expressed as an opcode and parameters |
+| Intent | What the user wants to accomplish. Expressed as opcode + targets + parameters. Separate from Contract |
+| Compiler | Node-local component that transforms Contract Definition + Parameters + Node Environment → executable DAG |
+| DAG Cache | Local cache keyed by (ContractID, env_fingerprint). Avoids recompilation on repeated execution |
 | Capability | A runtime-validated, session-scoped permission. NOT a static role |
 | Opcode | The operation type. Hierarchical namespace: DISCOVERY, CONTROL, EXECUTION, DATA |
 | Session | A scoped execution context with associated capabilities and constraints |
@@ -44,6 +53,7 @@ Sections are ordered by conceptual dependency, not by implementation order. Read
 | Join Token | A single-use, time-limited token that authorizes a node to enroll. Distributed out-of-band |
 | Recovery Authority | A holder of a Shamir secret share of the Root Key. M-of-N threshold can reconstruct the Root |
 | Crypto Suite ID | An identifier that maps to a concrete set of cryptographic algorithms. Protocol references Suite ID, not algorithm names |
+| Hash Suite | A first-class identifier (HashSuiteID) that specifies algorithm, digest size, output mode, and version. SMO defines 3 cryptographic suites (BLAKE3-256, SHA-256, SHA3-256) + performance suites (xxHash3, CRC32C, CityHash). Not all hash suites are cryptographic — see §16.6 |
 | Connectivity Layer | The layer responsible for NAT traversal, STUN, ICE, hole punching, relay. Produces a connected socket |
 | Trust Score | A composite local metric used as one input (not the sole) to execution decisions |
 | Citizen Score | A trust sub-component measuring online time, heartbeat stability, route reliability |
@@ -51,6 +61,32 @@ Sections are ordered by conceptual dependency, not by implementation order. Read
 | Witness Score | A trust sub-component measuring witness accuracy and participation |
 | Consistency Score | A trust sub-component measuring result agreement with majority |
 | Policy | Node-local rules governing which contracts it will accept and how to execute them |
+
+---
+
+### 0.1 Platform Tiers
+
+SMO is Linux-first. Platform-specific APIs (io_uring, getrandom, pidfd, cgroup v2, namespace, seccomp, eBPF) are encapsulated in a `platform/` layer — business logic never calls them directly.
+
+| Tier | Platform | Status | Notes |
+|---|---|---|---|
+| Tier 1 | Linux x86_64 | Fully supported | Primary target. All features. |
+| Tier 1 | Linux ARM64 | Fully supported | Same codebase, arch-specific SIMD. |
+| Tier 2 | Windows x64 | Supported (Stage 2) | Via `platform/` abstraction layer. |
+| Tier 2 | Windows ARM64 | Supported (Stage 2) | Via `platform/` abstraction layer. |
+| Tier 3 | macOS, BSD, others | Community maintained | Ports welcome, not core-maintained. |
+
+**Rules:**
+1. Business logic NEVER calls Linux APIs directly. All platform calls go through `platform::*`.
+2. Tier 1 must pass the full test suite before each release.
+3. Tier 2 must pass the full test suite; CI runs weekly.
+4. Tier 3 is community-maintained. Core team does not block on Tier 3 failures.
+
+**Build flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `-DWITH_PQC=ON/OFF` | ON | Build Suite 3 (PQC) with liboqs. Disabling removes all ML-KEM/ML-DSA code — no liboqs dependency. Suites 1–2 still work. |
 
 ---
 
@@ -99,6 +135,8 @@ The following philosophical positions anchor every architectural decision in SMO
 10. **Root Key NEVER circulates.** Only certificates circulate. Private keys never leave their host node.
 
 11. **Protocol describes meaning. Transport describes bytes.** The protocol layer defines what a contract is and how it flows. The transport layer decides whether to send those bytes over TCP, UDP, or a Unix socket. These are independent decisions.
+
+12. **Compilation is node-local.** Every node compiles contract definitions into DAGs independently. No DAG is ever transferred between nodes. This ensures heterogeneous nodes (different plugins, architectures, OS) produce valid execution plans.
 
 ---
 
@@ -175,47 +213,64 @@ Governance decisions, once committed, are never removed or altered. Corrections 
 ### I-23: Discovery Engine Is Separate from Transport
 The Discovery Engine handles peer discovery, health monitoring, and membership propagation. Transport only provides `send()` and `recv()` abstractions. These components MUST NOT be coupled.
 
+### I-24: Local Compilation
+Every node MUST compile contract definitions locally. DAGs MUST NEVER be transferred between nodes. Compilation is deterministic given the same inputs, but inputs vary per node (plugins, architecture, OS, policy).
+
+### I-25: Registry Immutability
+The Contract Registry MUST be append-only. No contract definition may be deleted or overwritten once published. A new version is a new ContractID.
+
+### I-26: Intent ≠ Contract
+An Intent is what a user wants. A Contract is how it is fulfilled. These are separate concepts with separate lifecycles. The Intent layer never touches the Contract Registry directly — the Contract Factory mediates.
+
+### I-27: Contract Data Purity
+A Contract definition MUST NOT embed application data, session state, or per-invocation parameters. It contains only the canonical execution template, capability requirements, and compiler hints.
+
 ---
 
 ## IV. SYSTEM LAYERS
 
-The architecture is decomposed into fifteen layers. No layer may bypass the layer below it.
+The architecture is decomposed into sixteen layers. No layer may bypass the layer below it.
 
 ```
 ┌──────────────────────────────────────────────┐
 │  1. CLI / SDK / POLICY ENGINE                 │  Entry points + OPA-like rules (post-MVP)
 ├──────────────────────────────────────────────┤
-│  2. INTENT LANGUAGE LAYER                     │  Contract source (JSON/YAML; later .seme DSL)
+│  2. INTENT LAYER                               │  User → Intent (opcode + targets + params)
+│                                                │  Contract Factory resolves Intent → ContractID
 ├──────────────────────────────────────────────┤
-│  3. EXECUTION COMPILER                        │  Intent → DAG compilation pipeline
+│  3. CONTRACT REGISTRY                         │  Immutable, append-only, Blake3-addressed
+│     + OPCODE REGISTRY                         │  Syscall-table: OpcodeID → handler metadata
 ├──────────────────────────────────────────────┤
-│  4. DAG SCHEDULER + RUNTIME POLICIES          │  DAG + priority, retry, preemption, quota
+│  4. EXECUTION COMPILER                        │  Contract + Parameters + Env → DAG (node-local)
+│     + DAG CACHE                               │  Keyed by (ContractID, env_fingerprint)
 ├──────────────────────────────────────────────┤
-│  5. NODE EXECUTION FSM                        │  Per-node state machine
+│  5. DAG SCHEDULER + RUNTIME POLICIES          │  DAG + priority, retry, preemption, quota
 ├──────────────────────────────────────────────┤
-│  6. GOVERNANCE PROTOCOL                       │  Multi-sig decisions, policy change, split/merge
+│  6. NODE EXECUTION FSM                        │  Per-node state machine
 ├──────────────────────────────────────────────┤
-│  7. TRUST ENGINE                              │  Attestation, scoring, weighting
+│  7. GOVERNANCE PROTOCOL                       │  Multi-sig decisions, policy change, split/merge
 ├──────────────────────────────────────────────┤
-│  8. PROTOCOL LAYER                            │
+│  8. TRUST ENGINE                              │  Attestation, scoring, weighting
+├──────────────────────────────────────────────┤
+│  9. PROTOCOL LAYER                            │
 │   ├── Discovery Protocol (UDP)                │  HELLO, PING, DISCOVER, HEARTBEAT
 │   ├── Control Protocol (TCP)                  │  CONTRACT, SESSION, WITNESS, CSR, GOVERNANCE
 │   ├── Execution Protocol (TCP)                │  EXEC_START, PROGRESS, RESULT, CANCEL
 │   └── Data Protocol (TCP)                     │  CHANNEL_OPEN, CHUNK, ACK, FIN
 ├──────────────────────────────────────────────┤
-│  9. DISCOVERY ENGINE + ROUTING                │  SWIM gossip, bootstrap, Peer Record, path selection
+│ 10. DISCOVERY ENGINE + ROUTING                │  SWIM gossip, bootstrap, Peer Record, path selection
 ├──────────────────────────────────────────────┤
-│ 10. SESSION LAYER                              │  Keys, certificate binding, signed nonce, version negotiation
+│ 11. SESSION LAYER                              │  Keys, certificate binding, signed nonce, version negotiation
 ├──────────────────────────────────────────────┤
-│ 11. CONNECTIVITY LAYER                        │  STUN, ICE, NAT traversal, hole punch, TURN relay
+│ 12. CONNECTIVITY LAYER                        │  STUN, ICE, NAT traversal, hole punch, TURN relay
 ├──────────────────────────────────────────────┤
-│ 12. TRANSPORT ABSTRACTION                     │  Interchangeable (TCP, UDP, future: QUIC, Unix socket)
+│ 13. TRANSPORT ABSTRACTION                     │  Interchangeable (TCP, UDP, future: QUIC, Unix socket)
 ├──────────────────────────────────────────────┤
-│ 13. RESOURCE MODEL                            │  CPU/RAM/IO limits, cgroup, namespace, seccomp
+│ 14. RESOURCE MODEL                            │  CPU/RAM/IO limits, cgroup, namespace, seccomp
 ├──────────────────────────────────────────────┤
-│ 14. PLUGIN ABI + WASM (future)                │  C ABI plugin interface
+│ 15. PLUGIN ABI + WASM (future)                │  C ABI plugin interface
 ├──────────────────────────────────────────────┤
-│ 15. IDENTITY + MEMBERSHIP LAYER               │  Keypairs, lifecycle, certificates, multi-tenant, manifest
+│ 16. IDENTITY + MEMBERSHIP LAYER               │  Keypairs, lifecycle, certificates, multi-tenant, manifest
 └──────────────────────────────────────────────┘
 ```
 
@@ -231,18 +286,37 @@ smo/
 │   ├── smo-admin/           Mesh administration (§XIX)
 │   └── smo-debug/           Internal tracing and debugging
 │
-├── core/                    Pure contracts/interfaces only. NO business logic.
-│   ├── intent/              Intent type definitions
-│   ├── opcode/              Hierarchical opcode enumeration (§XVIII)
+├── core/                    Pure interfaces/type definitions only. NO business logic.
+│   ├── contract/            Contract definition types, ContractID (§X)
+│   ├── intent/              Intent type definitions (§X)
+│   ├── opcode/              Opcode enumeration (§XVIII) + OpcodeRegistry interface (§XIX.8)
 │   ├── capability/          Capability type definitions (§VIII)
 │   ├── session/             Session type definitions
+│   ├── crypto/              Algorithm-agnostic crypto interface + providers (§XVI)
+│   │   ├── hash_provider.hpp    Abstract HashProvider interface
+│   │   ├── fwd.hpp              CryptoSuiteID, HashSuiteID, HashSuite enum, EncapsResult
+│   │   ├── suite.hpp            Suite ID constants (Classical=1, HybridPQC=2, PurePQC=3)
+│   │   ├── impl.hpp             CryptoProvider struct: RNG + Hash + PerfHash + AEAD + KEM + Signer
+│   │   ├── registry.hpp/.cpp    CryptoRegistry singleton
+│   │   ├── hash/                SHA-256 HashProvider
+│   │   ├── signer/              Ed25519 (Monocypher) + ML-DSA (liboqs)
+│   │   ├── kem/                 X25519 (Monocypher) + ML-KEM (liboqs)
+│   │   ├── aead/                XChaCha20-Poly1305 (Monocypher)
+│   │   ├── kdf/                 HKDF
+│   │   ├── random/              getrandom() CSPRNG
+│   │   └── secure/              Zeroize + constant-time compare
 │   ├── state/               State type definitions (§XIV)
 │   ├── identity/            NodeIdentity, Ed25519 keypair generation, nonce signing
 │   ├── mesh/                MeshID, MeshGenesis, Epoch, MembershipCertificate
 │   ├── enroll/              EnrollRequest, EnrollResponse, ExportFormat
 │   └── errors/              Error type definitions
 │
-├── compiler/                Intent → DAG compiler
+├── contract/                Contract subsystem
+│   ├── registry/            Contract Registry implementation (immutable, append-only)
+│   ├── factory/             Contract Factory — Intent → ContractID resolution
+│   └── compiler/            Contract → DAG compiler (node-local) + DAG cache
+│
+├── compiler/                (Legacy — contracts moved to contract/compiler/)
 │   ├── parser/              Contract source parser
 │   ├── planner/             Node planning and resource mapping
 │   ├── optimizer/           DAG optimization (future)
@@ -318,6 +392,15 @@ smo/
 │   ├── metrics/             Performance metrics
 │   ├── profiling/           CPU/memory profiling
 │   └── audit-viewer/        Audit log browser
+│
+├── providers/               Concrete crypto provider implementations
+│   ├── blake3_provider/     Blake3 HashProvider (default SMO native)
+│   ├── suite1_classical/    Suite 1 Classical: SHA-256 + Ed25519 + X25519 + XChaCha20
+│   ├── suite2_modern/       Suite 2 Modern:  BLAKE3 + Ed25519 + X25519 + XChaCha20
+│   ├── suite3_purepqc/      Suite 3 PurePQC: BLAKE3 + ML-DSA + ML-KEM + XChaCha20
+│   ├── openssl_sha256/      (future) SHA-256 for FIPS environments
+│   ├── openssl_sha3/        (future) SHA-3 for NIST/post-quantum readiness
+│   └── perfhash/            (future) Performance hash providers: xxHash3, CRC32C, CityHash
 │
 ├── plugins/                 External plugin directory (not built in)
 │
@@ -400,11 +483,11 @@ TRANSPORT LAYER
 
 SMO uses a **Crypto Suite ID** to achieve algorithm agility. The protocol NEVER references specific algorithms. It references Suite IDs. The mapping from Suite ID to concrete algorithms is a local configuration.
 
-| Suite ID | Name | Identity/Signing | Key Exchange | Symmetric | Hash |
-|---|---|---|---|---|---|
-| 1 | Classical | Ed25519 | X25519 | XChaCha20-Poly1305 | Blake3 |
-| 2 | Hybrid PQC | Ed25519 + ML-DSA | X25519 + ML-KEM | XChaCha20-Poly1305 | Blake3 |
-| 3 | Pure PQC | ML-DSA | ML-KEM | XChaCha20-Poly1305 | Blake3 |
+| Suite ID | Name | Identity/Signing | Key Exchange | Symmetric | Hash Suite |
+|---|---|---|---|---|---|---|
+| 1 | Classical | Ed25519 | X25519 | XChaCha20-Poly1305 | SHA-256 (ID=2) |
+| 2 | Modern | Ed25519 | X25519 | XChaCha20-Poly1305 | BLAKE3-256 (ID=1) |
+| 3 | PurePQC | ML-DSA-65 | ML-KEM-768 | XChaCha20-Poly1305 | BLAKE3-256 (ID=1) |
 
 **Rules:**
 - Every node MUST implement Suite 1 (minimum baseline).
@@ -712,7 +795,8 @@ receive(packet):
 ┌──────────────────────────────────────────────────┐
 │ IDENTITY                                          │
 │ "Tôi là node X."                                  │
-│ NodeID = Blake3(NodePublicKey)                    │
+│ NodeID = HashProvider::hash_hex(NodePublicKey)    │
+│ (default: BLAKE3-256 → 64 hex chars)              │
 │ Immutable for the lifetime of the node.           │
 ├──────────────────────────────────────────────────┤
 │ MEMBERSHIP                                        │
@@ -732,11 +816,11 @@ receive(packet):
 A mesh is defined by its **Mesh Genesis** — a deterministic ID derived at creation.
 
 ```
-MeshID = Blake3(
+MeshID = HashProvider::hash_hex(
     MeshRootPublicKey ||
     CreatedAtUnixMs ||
     32 random bytes
-)
+)   — 64 hex chars (BLAKE3-256 by default)
 ```
 
 **Mesh creation flow:**
@@ -745,7 +829,7 @@ MeshID = Blake3(
 smo mesh create --name "SOC-Production"
 
 1. Generate Mesh Root Keypair (Suite 1: Ed25519)
-2. Compute MeshID = Blake3(RootPK || time || random)
+2. Compute MeshID = HashProvider::hash_hex(RootPK || time || random)
 3. Generate first Authority Keypair
 4. Root signs Authority Certificate:
      AuthorityID, MeshID, Role: AUTHORITY,
@@ -1427,90 +1511,267 @@ Export changes only the presentation. The underlying EnrollRequest is identical.
 
 ## X. CONTRACT MODEL
 
-### 10.1 Contract Definition
+This section supersedes the original contract model (RFC 0001) with the layered architecture defined in RFC 0023. The three-party execution flow (Requester → Responder → Witness) remains valid at the execution layer (§XI), but the contract definition itself is now separated from intent and managed through a formal registry.
 
-A contract is a metadata-only document. It MUST NOT embed application data.
+### 10.1 Layered Model
 
-### 10.2 Contract Format (MVP)
+```
+User (CLI/GUI/REST/SDK)
+        │  expresses goal
+        ▼
+    Intent                 (what: opcode + targets + parameters)
+        │  resolved by
+        ▼
+    Contract Factory       (maps Intent → ContractID via Registry)
+        │
+        ▼
+    Contract Definition    (how: canonical template loaded from Registry)
+        │  compiled (node-local)
+        ▼
+    Compiler               (Contract + Parameters + Env → DAG)
+        │
+        ▼
+    DAG Cache              (keyed by ContractID + env_fingerprint)
+        │
+        ▼
+    Executor               (DAG-aware scheduler runs the graph)
+```
 
-Contracts use structured JSON/YAML in the MVP phase. A DSL (.seme) MAY be introduced later.
+**Key rule:** The user never touches a Contract directly. All entry points produce an Intent. The Contract Factory resolves Intent → ContractID. The Compiler loads the Contract definition from the local Registry, compiles it to a DAG, and hands the DAG to the Executor.
+
+### 10.2 Three Contract Categories
+
+| Category | Nature | Storage | Lifecycle | Examples |
+|---|---|---|---|---|
+| **Native** | Runtime-builtin template | Registered at startup from `contract/registry/native.cpp` | Fixed for SMO version; updated only via runtime upgrade | `ls`, `put`, `get`, `exec`, `quarantine` |
+| **User-defined** | Published by a mesh participant | Contract Registry (local DB, pulled from peers) | Draft → Publish → Sync → Compile → Execute → Deprecate | Incident playbooks, compliance checks, custom workflows |
+| **Internal** | Runtime-only, never user-invokable | Not in Registry; instantiated ad-hoc | Created and destroyed within a single session | Session teardown, trust recalculation, heartbeat handler |
+
+### 10.3 Contract Definition Schema
+
+Every contract (all three categories) is a **canonical JSON object**:
 
 ```json
 {
-  "contract_id": "c-91ad",
-  "requester": "node-a",
-  "responder": "node-b",
-  "witness": "node-c",
-  "opcode": {
-    "namespace": "CONTROL",
-    "id": "CONTRACT_PROPOSAL"
-  },
+  "contract_version": "1.0",
+  "category": "native",
+  "opcode": "ls",
+  "name": "List Directory",
+  "description": "List files at the specified path",
+  "publisher": "00000000-0000-0000-0000-000000000000",
+  "semver": "1.0.0",
   "parameters": {
-    "source": "/tmp/log.txt",
-    "target": "/myshared/log.txt"
+    "path": {
+      "type": "string",
+      "required": true,
+      "description": "Absolute path to list"
+    },
+    "recursive": {
+      "type": "boolean",
+      "required": false,
+      "default": false
+    }
   },
-  "constraints": {
-    "capabilities": ["CAP_FS_WRITE"],
-    "trust_min": 0.7
+  "capabilities_required": {
+    "filesystem_read": 1
   },
-  "policy": {
-    "overwrite": false
+  "compiler_hints": {
+    "max_parallelism": 1,
+    "timeout_sec": 30,
+    "idempotent": true
   },
-  "created_at": "2026-01-01T00:00:00Z",
-  "signature_requester": "...",
-  "signature_responder": "..."
+  "signature": null
 }
 ```
 
-### 10.3 Contract Record (Post-Execution)
+**Canonical JSON rules:**
+1. Keys sorted lexicographically.
+2. No whitespace beyond JSON requirement.
+3. No trailing newline.
+4. UTF-8 without BOM.
+
+#### Field definitions
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `contract_version` | string (semver) | yes | Schema version of the contract format |
+| `category` | string | yes | `native`, `user_defined`, or `internal` |
+| `opcode` | string | yes | Primary opcode this contract implements |
+| `name` | string | yes | Human-readable name (max 128 chars) |
+| `description` | string | no | Human-readable description (max 2048 chars) |
+| `publisher` | string (UUID) | yes | NodeID of publisher; zero-UUID for native |
+| `semver` | string (semver) | yes | Version of this contract definition |
+| `parameters` | object | yes | Parameter schema (JSON Schema subset) |
+| `capabilities_required` | object | yes | Capability → level map for execution |
+| `compiler_hints` | object | yes | max_parallelism, timeout_sec, idempotent |
+| `signature` | string (Base64) | conditional | Publisher's signature; null for native |
+
+### 10.4 ContractID
+
+```
+ContractID = HashProvider::hash_hex(utf8(canonical_json))
+           = HashSuite1(BLAKE3-256) → 64 hex chars by default
+```
+
+**Properties:**
+- **Content-addressed** — same canonical definition always produces the same ContractID.
+- **Immutable** — changing any field produces a different ContractID. No "update in place."
+- **64 hex chars** (256 bits) — matches SMO's default Hash Suite 1 (BLAKE3-256).
+- **Primary key** in Contract Registry, DAG cache, and Intent resolution.
+- **Algorithm-agnostic:** The formula always calls `HashProvider`. A FIPS node with SHA-256 configured produces ContractIDs over the same canonical JSON, but with different hash output (different SuiteID recorded in metadata).
+
+### 10.5 Contract Lifecycle
+
+```
+       ┌──────────┐
+       │  Draft   │  (local, not published)
+       └────┬─────┘
+            │ publish (sign + store)
+            ▼
+       ┌──────────┐
+       │ Published│  (in Registry, immutable)
+       └────┬─────┘
+            │ sync (pull from peer)
+            ▼
+       ┌──────────┐
+       │  Synced  │  (verified, stored locally)
+       └────┬─────┘
+            │ compile (node-local)
+            ▼
+       ┌──────────┐
+       │  Cached  │  (DAG in dag_store)
+       └────┬─────┘
+            │ execute
+            ▼
+       ┌──────────┐
+       │ Executed │  (run by Executor)
+       └──────────┘
+
+Post-execution:
+       ┌──────────┐
+       │ Deprecated│← publisher signature or governance
+       └──────────┘
+
+       ┌──────────┐
+       │  Revoked │← emergency governance (Level 3+)
+       └──────────┘
+```
+
+| Transition | From | To | Trigger |
+|---|---|---|---|
+| publish | Draft | Published | Publisher signs + calls `Publish()` |
+| sync | Published | Synced | Remote node calls `Sync()` |
+| compile | Synced | Cached | Compiler produces DAG; stored in `dag_store` |
+| deprecate | Published | Deprecated | Publisher signature or governance proposal |
+| revoke | Deprecated | Revoked | Emergency governance (Level 3+) |
+
+### 10.6 Contract Registry
+
+The Contract Registry is **Git-like, not Docker-like**:
+
+- **Immutable:** Once written, a ContractID cannot be deleted or overwritten.
+- **Append-only:** New contracts are appended; old ones remain for audit.
+- **Blake3-addressed:** Key = ContractID.
+- **Local-first:** Each node maintains its own Registry DB.
+- **Verifiable:** Every user-defined contract carries a publisher signature (§10.8).
+
+#### Registry schema (SqliteStore)
+
+```sql
+CREATE TABLE IF NOT EXISTS contract_registry (
+    contract_id     TEXT PRIMARY KEY,
+    canonical_json  TEXT NOT NULL,
+    category        TEXT NOT NULL,
+    opcode          TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    publisher       TEXT NOT NULL,
+    semver          TEXT NOT NULL,
+    parameters      TEXT NOT NULL,
+    capabilities    TEXT NOT NULL,
+    compiler_hints  TEXT NOT NULL,
+    signature       TEXT,
+    published_at    INTEGER NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'active',
+    deprecation_note TEXT
+);
+```
+
+#### Registry operations
+
+| Operation | Description |
+|---|---|
+| `Publish(definition, signature)` | Verify canonical JSON, compute ContractID, verify signature, insert |
+| `Resolve(opcode, version)` | Query registry for matching opcode; return latest active contract |
+| `Get(contract_id)` | Load canonical JSON by ContractID |
+| `Deprecate(contract_id, reason)` | Set status = 'deprecated'; requires publisher signature or governance |
+| `Sync(peer, since)` | Pull new contracts from peer since timestamp; verify each before insert |
+
+#### Sync strategy
+
+- **Pull-based:** Node A requests new contracts from Node B since a given timestamp.
+- **Verification:** Each entry is verified (signature, canonical JSON) before local insert.
+- **No DAG sync:** Only canonical definitions are synced. DAGs are never transferred.
+- **Trust filter:** A node only syncs from peers with trust score ≥ configured threshold.
+
+### 10.7 Intent → Contract Resolution
+
+```
+User: smo exec ls --path /tmp
+
+1. CLI produces Intent:
+   {
+     "opcode": "ls",
+     "targets": ["node-abc"],
+     "parameters": {"path": "/tmp"},
+     "scope": "single",
+     "trust_min": 0.5
+   }
+
+2. Contract Factory:
+   a. Look up ContractID for opcode "ls":
+      - Check user-specified contract_hint (optional)
+      - Query registry for latest active "ls" contract
+      - Fall back to native contract if no user-defined match
+   b. Return ContractDefinition
+
+3. Compiler:
+   a. Check local dag_cache for (ContractID, env_fingerprint)
+   b. Cache miss → compile Contract + Parameters → DAG
+   c. Store DAG in dag_cache
+
+4. Executor runs DAG (see §XIII)
+```
+
+### 10.8 Signature Scheme (User-Defined Contracts)
+
+1. Author computes `ContractID = Blake3(utf8(canonical_json))`.
+2. Author signs `ContractID` with their Ed25519 private key.
+3. `signature` field = Base64-encoded signature.
+4. Verification: compute `ContractID`, verify signature against publisher's public key.
+
+### 10.9 Contract Record (Post-Execution)
+
+The post-execution record (stored by all three participants) uses the same schema as §10.3 but adds runtime fields:
 
 | Field | Description |
 |---|---|
-| ContractID | Unique identifier |
+| ContractID | ContractID of the resolved contract |
+| IntentID | ID of the originating Intent |
 | RequesterID | Originating node |
 | ResponderID | Executing node |
 | WitnessID | Attesting node |
-| IntentHash | Hash of the raw intent |
-| PolicyHash | Hash of the effective policy |
-| StartTime | Execution start |
-| FinishTime | Execution end |
+| StartTime | Execution start (Unix ns) |
+| FinishTime | Execution end (Unix ns) |
 | Status | SUCCESS / FAILURE / REJECTED / TIMEOUT |
-| ResultHash | Hash of the execution result (not the data) |
-| AuditHash | Hash of the full audit trail |
+| ResultHash | HashProvider::hash_hex(execution result) — 64 hex chars |
+| AuditHash | HashProvider::hash_hex(full audit trail) — 64 hex chars |
 | RequesterSignature | Signed by requester |
 | ResponderSignature | Signed by responder |
 | WitnessSignature | Signed by witness |
 
-### 10.4 Contract Lifecycle
+### 10.10 Large Data Handling
 
-```
-[Requester] ──Proposal──> [Responder]
-                              │
-                    ┌─────────┼─────────┐
-                    │         │         │
-                    ▼         ▼         ▼
-              Check     Check      Ask
-              Policy   Capability  Witness
-                    │         │         │
-                    └─────────┼─────────┘
-                              │
-                              ▼
-                         Decision
-                        /        \
-                   EXECUTE      REJECT
-                       │
-                       ▼
-                 Record + Notify
-                  Witness + Requester
-```
-
-### 10.5 Contract Storage Rule
-
-All three participants (Requester, Responder, Witness) MUST store an identical contract record after execution completes.
-
-### 10.6 Large Data Handling
-
-If an opcode operates on large data, the data is transferred through a separate **Data Protocol** channel (CHANNEL_OPEN, CHUNK, ACK, FIN). The contract references the data only by hash.
+If an opcode operates on large data, the data is transferred through a separate **Data Protocol** channel (§VI.1). The contract references data only by hash.
 
 ---
 
@@ -1658,7 +1919,65 @@ EXECUTION DAG          →  immutable output
 
 Once the DAG is produced, it MUST NOT be modified. All nodes involved in execution operate on the same DAG. If a DAG must change, a new DAG is compiled from the original intent.
 
-### 13.4 Scheduler Runtime Policies
+### 13.4 Compiler Interface
+
+The compiler accepts a Contract Definition + Intent parameters + Node Environment and produces a DAG.
+
+```
+CompileInput {
+    ContractDefinition  contract;        // loaded from Registry by ContractID
+    std::string         parameters_json; // from Intent
+    NodeEnvironment     environment;     // os, arch, plugin versions, policy
+}
+
+CompileOutput {
+    DAG     dag;
+    string  env_fingerprint;  // Blake3 of environment snapshot
+    uint64  compiled_at;      // Unix nanoseconds
+}
+```
+
+**Node environment fingerprint:**
+
+```cpp
+struct NodeEnvironment {
+    string os;
+    string arch;
+    uint64 env_epoch;                       // incremented on plugin/policy change
+    map<string, string> plugin_versions;    // "plugin-id" → "1.2.0"
+    vector<string> enabled_policies;
+};
+```
+
+### 13.5 DAG Cache
+
+The DAG cache avoids recompilation when the same contract runs with the same environment.
+
+```
+Cache key = Blake3(ContractID + "|" + env_fingerprint)
+```
+
+**Rules:**
+1. **Cache hit:** Return cached DAG without recompiling.
+2. **Cache miss:** Compile, store in `dag_store`, return.
+3. **Cache invalidation:** When `env_epoch` changes (plugin install/remove, policy update), old cache entries are naturally bypassed because `env_fingerprint` changes.
+4. **Eviction:** LRU eviction when cache exceeds limit (default 1000 DAGs).
+5. **No DAG sync:** DAGs are never transferred between nodes. Each node compiles independently.
+
+#### DAG cache schema
+
+```sql
+CREATE TABLE IF NOT EXISTS dag_cache (
+    cache_key       TEXT PRIMARY KEY,
+    contract_id     TEXT NOT NULL,
+    env_fingerprint TEXT NOT NULL,
+    dag_json        TEXT NOT NULL,
+    compiled_at     INTEGER NOT NULL,
+    last_accessed   INTEGER NOT NULL
+);
+```
+
+### 13.6 Scheduler Runtime Policies
 
 The scheduler is DAG-aware but also implements runtime scheduling policies:
 
@@ -1827,7 +2146,7 @@ Never store mutable shared execution state globally. All stored state is per-nod
 | Ed25519 | Signing and identity |
 | X25519 | Key exchange |
 | XChaCha20-Poly1305 | Symmetric encryption |
-| Blake3 | Hashing |
+| Hash Suite 1 (BLAKE3-256) | Cryptographic hashing |
 
 ### 16.2 Crypto Suite 2 (Phase 2 — Hybrid PQC)
 
@@ -1836,7 +2155,7 @@ Never store mutable shared execution state globally. All stored state is per-nod
 | Ed25519 + ML-DSA (Dilithium) | Signing and identity |
 | X25519 + ML-KEM (Kyber) | Key exchange |
 | XChaCha20-Poly1305 | Symmetric encryption |
-| Blake3 | Hashing |
+| Hash Suite 1 (BLAKE3-256) | Cryptographic hashing |
 
 ### 16.3 Crypto Suite 3 (Phase 3 — Pure PQC)
 
@@ -1845,18 +2164,188 @@ Never store mutable shared execution state globally. All stored state is per-nod
 | ML-DSA (Dilithium) | Signing and identity |
 | ML-KEM (Kyber) | Key exchange |
 | XChaCha20-Poly1305 | Symmetric encryption |
-| Blake3 | Hashing |
+| Hash Suite 1 (BLAKE3-256) | Cryptographic hashing |
 
 ### 16.4 Key Management
 
 - Each node generates its own keypair during `smo-node init`.
-- NodeID = Blake3(NodePublicKey).
+- NodeID = HashProvider::hash_hex(NodePublicKey) (default: BLAKE3-256 → 64 hex chars).
 - Root Key generated at mesh creation, exported as encrypted Recovery Package, deleted from runtime.
 - Authority Keys are signed by the Root and stored on the Authority node.
 - Session keys are derived via the negotiated Crypto Suite's key exchange mechanism.
 - Long-term keys are stored in node_store (encrypted at rest).
 
-### 16.5 Session Binding (Certificate → Session)
+### 16.6 Hash Provider and Hash Suite Architecture
+
+#### 16.6.1 Overview
+
+All hashing in SMO goes through `HashProvider`, a swappable abstract interface in `core/crypto/hash_provider.hpp`. No business logic calls a hash algorithm directly.
+
+SMO defines **Hash Suite** as a first-class concept (see `core/crypto/fwd.hpp`):
+
+```
+Hash Suite
+├── Algorithm     (e.g. BLAKE3, SHA-256, SHA3-256, xxHash3)
+├── Digest Size   (e.g. 256 bits for crypto, 64 bits for perf)
+├── Output Mode   (e.g. raw bytes, hex string, stream)
+└── Version       (reserved for future algorithm revisions)
+```
+
+A single `HashSuiteID` (uint16_t) encodes all four parameters. This means:
+- Changing digest size (BLAKE3-256 vs BLAKE3-512) produces a different SuiteID.
+- Adding a new algorithm version (e.g. SHA-256 with different internal params) produces a different SuiteID.
+- Providers register per SuiteID, not per algorithm name.
+
+#### 16.6.2 Hash Suite Taxonomy
+
+SMO divides hashes into two categories:
+
+| Category | Purpose | Examples | Used For |
+|---|---|---|---|
+| **Cryptographic** | Security-critical, collision-resistant | BLAKE3-256, SHA-256, SHA3-256 | NodeID, ContractID, ManifestID, signatures, audit chain, integrity |
+| **Performance** | Speed-critical, non-security | xxHash3, CRC32C, CityHash | DAG cache keys, hash tables, bloom filters, checksums |
+
+#### 16.6.3 Three Official Cryptographic Hash Suites
+
+SMO defines exactly 3 cryptographic hash suites. No more.
+
+| HashSuiteID | Name | Algorithm | Digest | Status | Use Case |
+|---|---|---|---|---|---|
+| 1 | `HASH_BLAKE3` | BLAKE3 | 256 bits | **Default** | SMO native — fastest, parallel, CC0, XOF |
+| 2 | `HASH_SHA256` | SHA-256 | 256 bits | Required | FIPS, OpenSSL, TPM, HSM, AWS KMS, PKCS#11, TLS, X.509, SSH, Git, Docker |
+| 3 | `HASH_SHA3_256` | SHA3-256 (Keccak) | 256 bits | Optional | NIST standard, hardware ASIC, government, defense |
+
+**Suite 1 — BLAKE3-256 (Default)**
+- Speed: ~4–8 GB/s (tree hash, parallelizable). SHA-256 is ~1 GB/s (linear).
+- XOF: Extensible output (any length), useful for key derivation and cache keys.
+- License: CC0 1.0 (public domain), no copyleft restrictions.
+- Incremental: Can hash streaming data without holding everything in memory.
+- Every component defaults to BLAKE3-256. Only explicit configuration changes it.
+
+**Suite 2 — SHA-256 (FIPS Compatibility)**
+- Required because the entire external world (OpenSSL, Linux Kernel, TPM, HSM, AWS KMS, Azure, PKCS#11, TLS, X.509, SSH, Git, Docker) understands SHA-256.
+- If government/military/FIPS mandates "no BLAKE3", recompile with Hash Suite 2. Zero business logic changes.
+- Slower than BLAKE3 (~1 GB/s), but universally accepted.
+
+**Suite 3 — SHA3-256 (NIST Future-Proof)**
+- NIST standard (Keccak), hardware ASIC support expected.
+- Slower than both BLAKE3 and SHA-256, but mandated in some defense/government contexts.
+- Included for long-term readiness.
+
+#### 16.6.4 Explicitly Excluded Algorithms
+
+| Algorithm | Reason |
+|---|---|
+| **BLAKE2** | Strictly dominated by BLAKE3 in speed, parallelism, XOF, and simplicity. Legacy only. |
+| **MD5** | Broken. Collision attacks since 2004. Never used. |
+| **SHA-1** | Broken. SHAttered (2017), SHambles (2020). Never used. |
+| **Whirlpool** | Niche. No hardware support. No ecosystem advantage over SHA-3. |
+| **xxHash** (for crypto) | Non-cryptographic. Not collision-resistant. Cannot be used for NodeID, signatures, or integrity. |
+
+#### 16.6.5 Performance Hash Category
+
+For non-security uses (DAG cache keys, hash tables, bloom filters, checksums), SMO uses **performance hashes**:
+
+| HashSuiteID | Name | Speed | Use Case |
+|---|---|---|---|
+| 101 | xxHash3 | ~30 GB/s | Cache keys, hash tables, fast checksums |
+| 102 | CRC32C | hardware | SSE 4.2 / ARM CRC, network checksums |
+| 103 | CityHash | ~15 GB/s | Hash tables (Google-originated) |
+
+Performance hashes do NOT flow through the `HashProvider` abstraction. They are used directly in data structures via `PerformanceHashImpl` (see `core/crypto/impl.hpp`):
+
+```cpp
+struct PerformanceHashImpl {
+    uint64_t (*hash64)(BytesView data) = nullptr;
+    uint32_t (*hash32)(BytesView data) = nullptr;
+};
+```
+
+The `CryptoProvider` struct bundles both `HashImpl` (cryptographic) and `PerformanceHashImpl` (non-cryptographic). A provider may set `perf_hash` to null; only the cryptographic `hash`/`hmac` are required.
+
+#### 16.6.6 C++ Interface
+
+```cpp
+// core/crypto/fwd.hpp
+enum class HashSuite : uint16_t {
+    Blake3     = 1,   // default SMO native
+    Sha256     = 2,   // FIPS compatibility
+    Sha3_256   = 3,   // NIST future-proof
+    // Performance hashes
+    XxHash3    = 101,
+    Crc32C     = 102,
+    CityHash   = 103,
+};
+
+inline constexpr bool is_crypto_hash(HashSuite s) noexcept {
+    return s == HashSuite::Blake3 || s == HashSuite::Sha256 || s == HashSuite::Sha3_256;
+}
+inline constexpr bool is_performance_hash(HashSuite s) noexcept {
+    return s == HashSuite::XxHash3 || s == HashSuite::Crc32C || s == HashSuite::CityHash;
+}
+```
+
+#### 16.6.7 Architecture Summary
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Consumer: ContractID, NodeID, ManifestID, DAG cache    │
+│  ─────────────────────────────────────────────────────  │
+│  Uses: HashProvider::hash(data) → 32 bytes              │
+│         HashProvider::hash_hex(data) → 64-char hex      │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│  HashProvider (abstract interface)                       │
+│  core/crypto/hash_provider.hpp                           │
+│  HashSuiteID determines which concrete impl to call      │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+          ┌────────────┼────────────┐
+          │            │            │
+          ▼            ▼            ▼
+┌────────────────┐ ┌──────────┐ ┌──────────────┐
+│ HashSuite 1    │ │Suite 2   │ │ Suite 3      │
+│ Blake3Provider │ │SHA256    │ │ SHA3_256     │
+│ providers/     │ │(future)  │ │ (future)     │
+│ blake3_provider│ │          │ │ sha3_provider│
+└───────┬────────┘ └──────────┘ └──────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────────────────┐
+│  third_party/blake3/  (official BLAKE3 C, SIMD:      │
+│  SSE2, SSE4.1, AVX2, AVX512, NEON)                  │
+└─────────────────────────────────────────────────────┘
+```
+
+**Rules:**
+1. Every business-logic component that needs hashing MUST depend on `HashProvider`, never on a specific algorithm.
+2. `HashProvider` is registered at startup via `HashProviderRegistry` singleton (default = HashSuite 1 / BLAKE3-256).
+3. Swapping to SHA-256 (FIPS) or SHA3-256 (NIST) requires only: write a new provider → register it → recompile. No business logic changes.
+4. The concrete provider lives in `providers/`, NOT in `core/`. Third-party hash sources live in `third_party/`, NOT in `core/crypto/`.
+5. Performance hashes use `PerformanceHashImpl` (function-pointer table), NOT the virtual `HashProvider` interface. They are non-cryptographic and used only for data structures.
+6. **No BLAKE2.** Blake3 strictly dominates BLAKE2 in speed, parallelism, XOF, and simplicity. BLAKE2 is legacy.
+7. **No xxHash** for cryptographic purposes. Despite its speed, xxHash is not collision-resistant and must never be used for NodeID, ContractID, signatures, or integrity.
+
+### 16.7 Crypto Utility Layer
+
+SMO provides a set of small, auditable crypto utilities in `core/crypto/`:
+
+| Component | File(s) | Purpose |
+|---|---|---|
+| **SecureBuffer** | `secure/zeroize.hpp/.cpp` | RAII buffer that zeroes memory on destruction. Uses volatile memset to prevent compiler elision. |
+| **constant_time_compare** | `secure/secure_compare.hpp/.cpp` | Timing-safe memory comparison. Used for MAC verification, key confirmation. |
+| **CSPRNG** | `random/getrandom.hpp/.cpp` | Wraps Linux `getrandom()` syscall. Used for key generation, nonce generation, seed material. |
+| **HKDF** | `kdf/hkdf.hpp/.cpp` | HMAC-based Key Derivation (RFC 5869). Uses **fixed HMAC-SHA256** regardless of active hash suite. This guarantees session key derivation is identical across all suites. |
+
+**Rules:**
+1. Every key in RAM MUST be stored in a `SecureBuffer` and zeroed after use.
+2. Every MAC comparison MUST use `constant_time_compare`, never `memcmp`.
+3. All random bytes MUST come from `random::fill()`, never from `rand()`, `random_device`, or `std::mt19937`.
+4. Session keys MUST be derived via HKDF from the KEM shared secret, never used raw.
+
+### 16.8 Session Binding (Certificate → Session)
 
 After the certificate is established, session-level authentication uses a **signed nonce** challenge:
 
@@ -2010,6 +2499,44 @@ These map to the original SM opcodes but are expressed as contract parameters, n
 Every opcode MUST be either:
 - **replay-safe**: executing it N times produces the same effect as executing it once, OR
 - **explicitly declared non-idempotent**: the system documents that replay has side effects.
+
+### 19.8 Opcode Registry
+
+The Opcode Registry is a **syscall-table-like registry** mapping `OpcodeID → handler metadata`. It lives in `core/opcode/` and is populated at startup from two sources:
+
+1. **Builtin opcodes:** hardcoded in `opcode.h` (LS=0x01, PUT=0x02, etc.)
+2. **Plugin opcodes:** registered by loaded plugins via `register_opcode()` at init time
+
+#### OpcodeEntry schema
+
+```cpp
+struct OpcodeEntry {
+    Opcode       id;              // 0x01–0xEF builtin, 0xF0–0xFE plugin, 0xFF custom
+    std::string  name;            // "ls", "put", "get", ...
+    std::string  semver;          // opcode version
+    uint32_t     capability_mask; // required capabilities
+    bool         idempotent;
+    std::string  contract_id;     // default ContractID for this opcode
+    std::string  plugin_id;       // empty for builtin
+    std::vector<std::string> supported_arches;
+};
+```
+
+#### Opcode range allocation
+
+| Range | Owner | Registration |
+|---|---|---|
+| 0x01–0xEF | Builtin SMO opcodes | Hardcoded in `opcode.h` |
+| 0xF0–0xFA | Reserved for future builtin | — |
+| 0xFB–0xFE | Plugin opcodes | `register_opcode()` at plugin load |
+| 0xFF | Custom/user-defined | Reserved for dynamic dispatch |
+
+#### Opcode → Contract resolution
+
+Opcodes and Contracts are **1:N**. A single opcode (e.g. `ls`) can have multiple contract implementations. The Contract Factory selects which ContractID to use based on:
+- The Intent's opcode
+- The Intent's `contract_hint` (optional, user-specified)
+- The node's local Registry state (latest compatible active version)
 
 ---
 
@@ -2204,14 +2731,80 @@ identity + transport + session + signature + time + version
 
 ### Stage 2 — Node Core
 
+#### Sprint 2.1 — Protocol
+
 ```
-enrollment + single-node FSM + mesh manifest
+packet serialization + signing + encryption + replay protection + schema
 ```
-- .smor/.smoc enrollment flow
-- Mesh Manifest (mesh.yaml import)
-- Contract proposal/accept/reject
-- Single-node execution FSM
-- Node Identity Lifecycle: JOINED → ACTIVE
+- PacketHeader (37-byte fixed header) + variable payload + 64-byte signature
+- Ed25519 signing and verification
+- XChaCha20-Poly1305 encryption
+- ReplayProtector (nonce + timestamp window)
+- Schema helpers
+
+#### Sprint 2.2 — Storage
+
+```
+SqliteStore KV backend + 5 store implementations
+```
+- session_store, audit_store, node_store, dag_store, trust_store
+- SqliteStore: Init, Get, Set, Delete, Exists
+- Migration support (schema version tracking)
+
+#### Sprint 2.3 — Transport High-Level
+
+```
+transport abstraction + framing + TCP transport + version handshake
+```
+- Framing layer (message length prefix, version byte)
+- TCP transport: listen/connect/send/close with poll timeout
+- Version handshake during connect
+- Callback-based event model
+
+#### Sprint 2.4 — Contract Architecture RFC
+
+```
+RFC 0023 + SPEC.md §X update
+```
+- Write Contract Architecture RFC (Intent model, 3 contract categories, ContractID, Registry, Compiler boundary, DAG cache)
+- Update SPEC.md §X, §XIII, §XIX, §IV, §V with new architecture
+
+#### Sprint 2.5 — Contract Registry + Opcode Registry
+
+```
+ContractRegistry + OpcodeRegistry + ContractFactory + Intent extensions
+```
+- `core/opcode/opcode_registry.hpp` — OpcodeRegistry class with builtin registration + plugin registration
+- `core/contract/contract_id.hpp` — ContractID type with HashProvider computation
+- `core/contract/contract_definition.hpp` — ContractDefinition struct with canonical JSON serialization
+- `core/intent/intent.h` — extend Intent with optional `contract_hint` field
+- `contract/registry/contract_registry.hpp` — ContractRegistry with Publish, Resolve, Get, Deprecate, Sync
+- `contract/registry/native.cpp` — Native contract registration (ls, put, get, exec, quarantine)
+- `contract/factory/contract_factory.hpp` — ContractFactory resolving Intent → ContractDefinition
+- **Hash Suite architecture:** `core/crypto/fwd.hpp` — HashSuite enum, `core/crypto/suite.hpp` — HashSuiteID constants, `core/crypto/impl.hpp` — PerformanceHashImpl, SPEC.md §16.6 update with Hash Suite taxonomy
+- Tests: ContractID computation, registry CRUD, opcode registration, factory resolution
+
+#### Sprint 2.6 — Compiler
+
+```
+contract/compiler/ + DAG cache
+```
+- `contract/compiler/compiler.hpp` — Compiler class with compile() and cache_get()
+- `NodeEnvironment` struct with fingerprint computation
+- `contract/compiler/dag_cache.hpp` — DAG cache backed by dag_store
+- Compiler transforms ContractDefinition + parameters + env → DAG
+- Native contracts produce trivial single-node DAGs with direct handler dispatch
+- Tests: compile native contract, cache hit/miss, env fingerprint change invalidates cache
+
+#### Sprint 2.7 — Executor Integration
+
+```
+Executor + Scheduler integration with new contract pipeline
+```
+- Executor calls Compiler instead of parsing raw Intent
+- Scheduler works with DAG from Compiler (same DAG format, new source)
+- Contract record stores ContractID + IntentID (backward-compatible with existing execution FSM)
+- End-to-end test: Intent → Factory → Registry → Compiler → DAG → Executor
 
 ### Stage 3 — Multi-Node
 
@@ -2318,31 +2911,41 @@ Every execution MUST declare its resource requirements (CPU, RAM, timeout, prior
 ## XXVI. FINAL ARCHITECTURE VIEW
 
 ```
-                      ┌──────────────────────────────────────────────┐
-                      │              APPLICATION                     │
-                      │  (incident response, fleet ops, ...)        │
-                      └──────────────────┬───────────────────────────┘
-                                         │
-                      ┌──────────────────▼───────────────────────────┐
-                      │   CLI / SDK · smo-cli · smo-admin · smo-node │
-                      └──────────────────┬───────────────────────────┘
-                                         │
-                      ┌──────────────────▼───────────────────────────┐
-                      │          INTENT LANGUAGE                     │
-                      │          JSON/YAML                           │
-                      └──────────────────┬───────────────────────────┘
-                                         │
-                      ┌──────────────────▼───────────────────────────┐
-                      │    POLICY ENGINE (post-MVP)                  │
-                      │    OPA-like rule evaluation                  │
-                      └──────────────────┬───────────────────────────┘
-                                         │
-                      ┌──────────────────▼───────────────────────────┐
-                      │   COMPILER · SCHEDULER · FSM                 │
-                      │   Parse → Resolve → Plan → DAG              │
-                      │   DAG-aware · Priority · Retry · Cancel     │
-                      │   Node FSM · Mesh FSM · Resource Model      │
-                      └──────────────────┬───────────────────────────┘
+                       ┌──────────────────────────────────────────────┐
+                       │              APPLICATION                     │
+                       │  (incident response, fleet ops, ...)        │
+                       └──────────────────┬───────────────────────────┘
+                                          │
+                       ┌──────────────────▼───────────────────────────┐
+                       │   CLI / SDK · smo-cli · smo-admin · smo-node │
+                       └──────────────────┬───────────────────────────┘
+                                          │  produces
+                                          ▼
+                       ┌──────────────────────────────────────────────┐
+                       │          INTENT LAYER                        │
+                       │  Intent (opcode + targets + params)          │
+                       │  Contract Factory → ContractID               │
+                       └──────────────────┬───────────────────────────┘
+                                          │  resolves
+                                          ▼
+                       ┌──────────────────────────────────────────────┐
+                       │   CONTRACT REGISTRY + OPCODE REGISTRY        │
+                       │   Immutable · Append-only · Blake3-addressed │
+                       │   Syscall-table: OpcodeID → handler metadata │
+                       └──────────────────┬───────────────────────────┘
+                                          │  compiles (node-local)
+                                          ▼
+                       ┌──────────────────▼───────────────────────────┐
+                       │   COMPILER + DAG CACHE                       │
+                       │   Contract + Params + Env → DAG              │
+                       │   Cache keyed by (ContractID, env_fp)       │
+                       └──────────────────┬───────────────────────────┘
+                                          │
+                       ┌──────────────────▼───────────────────────────┐
+                       │   SCHEDULER · FSM                            │
+                       │   DAG-aware · Priority · Retry · Cancel     │
+                       │   Node FSM · Mesh FSM · Resource Model      │
+                       └──────────────────┬───────────────────────────┘
                                          │
                       ┌──────────────────▼───────────────────────────┐
                       │   GOVERNANCE PROTOCOL (multi-sig)            │
@@ -2401,9 +3004,11 @@ Every execution MUST declare its resource requirements (CPU, RAM, timeout, prior
 |---|---|
 | Application | §I |
 | CLI / SDK | §XX |
-| Intent Language | §X |
+| Intent Layer | §X.1, §X.7 |
+| Contract Registry + Opcode Registry | §X.6, §XIX.8 |
+| Compiler + DAG Cache | §XIII.4, §XIII.5 |
+| Scheduler / FSM | §XIII.6, §XIV, §XXX |
 | Policy Engine | §XXXII (post-MVP) |
-| Compiler / Scheduler / FSM | §XIII, §XIV, §XXX |
 | Governance Protocol | §XXXIII |
 | Control Protocol | §VI.1, §XIX.3 |
 | Execution Protocol | §VI.1, §XIX.4 |

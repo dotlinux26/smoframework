@@ -1,0 +1,2 @@
+add_library(smo_transport_relay INTERFACE)
+target_include_directories(smo_transport_relay INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

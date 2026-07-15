@@ -1,0 +1,2 @@
+add_library(smo_sdk_plugin INTERFACE)
+target_include_directories(smo_sdk_plugin INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

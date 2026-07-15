@@ -1,0 +1,2 @@
+add_library(smo_transport_quic INTERFACE)
+target_include_directories(smo_transport_quic INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

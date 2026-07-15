@@ -1,0 +1,2 @@
+add_library(smo_fsm_transitions INTERFACE)
+target_include_directories(smo_fsm_transitions INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

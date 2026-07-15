@@ -27,4 +27,12 @@ enum class MessageType : uint8_t {
     CAPABILITY_REVOKE   = 0x41,
 };
 
+const char* to_string(MessageType mt) noexcept;
+bool is_control_message(MessageType mt) noexcept;
+bool is_contract_message(MessageType mt) noexcept;
+bool is_witness_message(MessageType mt) noexcept;
+
+ProtocolVersion current_protocol_version() noexcept;
+bool is_compatible(const ProtocolVersion& peer, const ProtocolVersion& local) noexcept;
+
 } // namespace smo

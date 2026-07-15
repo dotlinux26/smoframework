@@ -1,0 +1,6 @@
+add_subdirectory(blake3_provider)
+add_subdirectory(suite1_classical)
+add_subdirectory(suite2_modern)
+if(WITH_PQC)
+    add_subdirectory(suite3_purepqc)
+endif()

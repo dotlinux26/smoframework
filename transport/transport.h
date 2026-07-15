@@ -8,7 +8,7 @@
 #include "core/errors/errors.h"
 #include "protocol/packet/packet.h"
 
-namespace smo {
+namespace smo::hl {
 
 // §IV Layer 7 — Transport Abstraction
 //
@@ -38,4 +38,4 @@ public:
     virtual void close() noexcept = 0;
 };
 
-} // namespace smo
+} // namespace smo::hl

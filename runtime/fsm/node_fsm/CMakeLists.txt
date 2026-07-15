@@ -1,0 +1,2 @@
+add_library(smo_fsm_node_fsm INTERFACE)
+target_include_directories(smo_fsm_node_fsm INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

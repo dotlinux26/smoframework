@@ -1,0 +1,2 @@
+add_library(smo_tooling_profiling INTERFACE)
+target_include_directories(smo_tooling_profiling INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

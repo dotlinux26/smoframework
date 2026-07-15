@@ -1,0 +1,2 @@
+add_library(smo_trust_decay INTERFACE)
+target_include_directories(smo_trust_decay INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -1,0 +1,2 @@
+add_library(smo_compiler_validator INTERFACE)
+target_include_directories(smo_compiler_validator INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

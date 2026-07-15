@@ -1,0 +1,2 @@
+add_library(smo_tooling_tracing INTERFACE)
+target_include_directories(smo_tooling_tracing INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

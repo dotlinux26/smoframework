@@ -1,0 +1,2 @@
+add_library(smo_acl_presets INTERFACE)
+target_include_directories(smo_acl_presets INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

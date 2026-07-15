@@ -1,0 +1,2 @@
+add_library(smo_acl_revocation INTERFACE)
+target_include_directories(smo_acl_revocation INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

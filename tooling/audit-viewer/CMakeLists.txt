@@ -1,0 +1,2 @@
+add_library(smo_tooling_audit-viewer INTERFACE)
+target_include_directories(smo_tooling_audit-viewer INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

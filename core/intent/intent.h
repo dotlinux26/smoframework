@@ -28,6 +28,10 @@ struct Intent {
     // Invariant I-01: Intent MUST NOT carry application data.
     // Parameters reference external data by hash only.
     std::string       parameters_json;  // opcode-specific JSON blob
+
+    // Optional: user specifies preferred ContractID (64-char hex).
+    // Empty = "best match" via Contract Factory.
+    std::string       contract_hint;
 };
 
 } // namespace smo

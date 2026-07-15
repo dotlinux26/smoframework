@@ -4,7 +4,7 @@
 #include <vector>
 #include <span>
 
-namespace smo {
+namespace smo::hl {
 
 // §VI — Message framing over stream transports.
 //
@@ -26,4 +26,4 @@ size_t frame_read(std::span<const uint8_t> buf, std::span<const uint8_t>& out);
 // Prepend a frame header to a payload.
 void frame_write(std::span<const uint8_t> payload, std::vector<uint8_t>& out);
 
-} // namespace smo
+} // namespace smo::hl
