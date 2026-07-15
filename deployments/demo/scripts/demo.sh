@@ -6,9 +6,9 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 COMPOSE_FILE="${ROOT}/deployments/demo/docker-compose.yml"
 
 # Detect Docker Compose variant
-if command -v docker-compose &>/dev/null; then
+if which docker-compose &>/dev/null; then
     DOCKER_COMPOSE="docker-compose"
-elif docker compose version &>/dev/null 2>&1; then
+elif docker --help 2>/dev/null | grep -qi compose; then
     DOCKER_COMPOSE="docker compose"
 else
     echo "ERROR: Neither docker-compose nor 'docker compose' found"
