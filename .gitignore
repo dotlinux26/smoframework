@@ -18,7 +18,6 @@ Thumbs.db
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
-Makefile
 compile_commands.json
 
 # Object files
