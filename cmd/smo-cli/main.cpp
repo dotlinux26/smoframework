@@ -248,14 +248,36 @@ static int cmd_exec(const std::vector<std::string>& args) {
         opcode = args[0];
     }
     if (opcode.empty()) {
+        if (dry_run) {
+            // Selection-only mode: show what would be selected
+            std::printf("Selection Engine (dry-run):\n");
+            if (!name.empty())      std::printf("  -> name:       %s\n", name.c_str());
+            if (!role.empty())      std::printf("  -> role:       %s\n", role.c_str());
+            if (!tags.empty())      { std::printf("  -> tags:       "); for (auto& t : tags) std::printf("%s ", t.c_str()); std::printf("\n"); }
+            if (!where.empty())     std::printf("  -> where:      %s\n", where.c_str());
+            if (!os.empty())        std::printf("  -> os:         %s\n", os.c_str());
+            if (!arch.empty())      std::printf("  -> arch:       %s\n", arch.c_str());
+            if (!version.empty())   std::printf("  -> version:    %s\n", version.c_str());
+            if (!trust_range.empty()) std::printf("  -> trust:      %s\n", trust_range.c_str());
+            if (!mesh.empty())      std::printf("  -> mesh:       %s\n", mesh.c_str());
+            if (!cap.empty())       std::printf("  -> cap:        %s\n", cap.c_str());
+            if (!scope.empty())     std::printf("  -> scope:      %s\n", scope.c_str());
+            if (nearest)            std::printf("  -> mode:       nearest\n");
+            if (random_n > 0)       std::printf("  -> mode:       random %d\n", random_n);
+            if (top_n > 0)          std::printf("  -> mode:       top %d\n", top_n);
+            std::printf("  (dry-run — no execution)\n");
+            return 0;
+        }
         std::fprintf(stderr, "Error: --opcode is required\n");
         return 1;
     }
 
     // Built-in contracts
     if (opcode == "ping") {
-        std::printf("{\"status\":\"pong\",\"timestamp\":%ld,\"node\":\"%s\"}\n",
+        std::printf("{\"status\":\"pong\",\"timestamp\":%ld,\"node\":\"%s\"",
                     std::time(nullptr), name.empty() ? "localhost" : name.c_str());
+        if (!scope.empty()) std::printf(",\"scope\":\"%s\"", scope.c_str());
+        std::printf("}\n");
         return 0;
     }
 

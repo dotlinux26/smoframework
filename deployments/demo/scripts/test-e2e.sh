@@ -118,13 +118,13 @@ do_verify "Contract resolved" "smo exec ls --name soc-hn-01 --dry-run 2>&1" "ls"
 # ── Phase 9: Session Management ──────────────────────────
 step "9/13  Session Management"
 
-do_verify "Session create"    "smo session open --name soc-hn-01 2>&1" "session"
+do_verify "Session create"    "smo session open --name soc-hn-01 2>&1" "Session opened"
 
 # ── Phase 10: Scope Dispatch ─────────────────────────────
 step "10/13 Dispatch Scope — single vs mesh"
 
-do_verify "Single scope"     "smo exec ping --scope single --dry-run 2>&1" "single"
-do_verify "Mesh scope"       "smo exec ping --scope mesh --dry-run 2>&1" "mesh"
+do_verify "Single scope"     "smo exec ping --scope single --dry-run 2>&1" "scope\":\"single"
+do_verify "Mesh scope"       "smo exec ping --scope mesh --dry-run 2>&1" "scope\":\"mesh"
 
 # ── Phase 11: Capability Check ───────────────────────────
 step "11/13 Capability Enforcement"
