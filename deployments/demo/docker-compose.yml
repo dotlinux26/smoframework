@@ -1,4 +1,4 @@
-version: "3.9"
+
 
 networks:
   smo-mesh:
@@ -18,7 +18,7 @@ services:
       smo-mesh:
         ipv4_address: 172.20.0.10
     ports:
-      - "7777:7777"
+      - "27777:7777"
     environment:
       SMO_NODE_NAME: "soc-hn-01"
       SMO_NODE_ROLE: "Authority"
