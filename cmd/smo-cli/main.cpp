@@ -18,14 +18,19 @@
 #include <core/crypto/impl.hpp>
 #include <core/identity/identity.hpp>
 #include <core/discovery/discovery.hpp>
+#include <core/transport/transport.hpp>
+#include <core/transport/tcp_transport.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -101,10 +106,47 @@ static int cmd_node_init(const std::vector<std::string>& args) {
         return 1;
     }
 
+    // Generate Ed25519 keypair + derive NodeID
+    smo::CryptoProvider crypto;
+    if (!crypto.signer.sign) {
+        std::fprintf(stderr, "Error: crypto provider not initialized\n");
+        return 1;
+    }
+    smo::RngRef rng{crypto.rng};
+    smo::Bytes public_key(32), secret_key(64);
+    if (auto r = crypto.signer.keypair(public_key, secret_key, rng); !r) {
+        std::fprintf(stderr, "Error: failed to generate keypair\n");
+        return 1;
+    }
+
+    // Derive NodeID = Blake3(public_key)
+    smo::Bytes node_id_bytes(32);
+    if (auto r = crypto.hash.hash(public_key); !r) {
+        std::fprintf(stderr, "Error: failed to hash public key\n");
+        return 1;
+    } else {
+        if (r.value().size() >= 32) {
+            std::memcpy(node_id_bytes.data(), r.value().data(), 32);
+        }
+    }
+
+    // Convert NodeID to hex
+    std::ostringstream node_id_oss;
+    for (uint8_t b : node_id_bytes) node_id_oss << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+    std::string node_id_hex = node_id_oss.str();
+
+    // Convert keys to hex
+    std::ostringstream pk_oss, sk_oss;
+    for (uint8_t b : public_key) pk_oss << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+    for (uint8_t b : secret_key) sk_oss << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+
     // Create identity JSON
     std::string json =
         "{\n"
         "  \"display_name\": \"" + name + "\",\n"
+        "  \"node_id\": \"" + node_id_hex + "\",\n"
+        "  \"public_key\": \"" + pk_oss.str() + "\",\n"
+        "  \"secret_key\": \"" + sk_oss.str() + "\",\n"
         "  \"created_at\": \"" + std::to_string(std::time(nullptr)) + "\",\n"
         "  \"state\": \"KEY_GENERATED\"\n"
         "}\n";
@@ -125,6 +167,7 @@ static int cmd_node_init(const std::vector<std::string>& args) {
 
     std::printf("Node initialized.\n");
     std::printf("  Display name: %s\n", name.c_str());
+    std::printf("  Node ID:      %s\n", node_id_hex.c_str());
     std::printf("  Identity:     %s\n", id_path.c_str());
     std::printf("  State:        KEY_GENERATED\n");
     return 0;
@@ -186,8 +229,83 @@ static int cmd_node_connect(const std::vector<std::string>& args) {
         std::fprintf(stderr, "Usage: smo node connect --address <host:port>\n");
         return 1;
     }
-    std::printf("Connecting to %s...\n", address.c_str());
-    std::printf("(Connection via TCP transport — placeholder)\n");
+
+    auto data_dir = get_data_dir();
+    auto id_path = data_dir + "/identity.json";
+    if (!fs::exists(id_path)) {
+        std::fprintf(stderr, "Error: node not initialized (run 'smo node init' first)\n");
+        return 1;
+    }
+
+    // Load local NodeID from identity.json
+    std::ifstream f(id_path);
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+    f.close();
+
+    // Parse NodeID from identity.json (naive: look for "node_id")
+    auto pos = content.find("\"node_id\"");
+    if (pos == std::string::npos) pos = content.find("\"id\"");
+    smo::NodeID local_id;
+    if (pos != std::string::npos) {
+        auto start = content.find('"', pos + 8);
+        auto end = content.find('"', start + 1);
+        if (start != std::string::npos && end != std::string::npos) {
+            std::string id_hex = content.substr(start + 1, end - start - 1);
+            // Expect 64 hex chars = 32 bytes
+            if (id_hex.size() == 64) {
+                for (size_t i = 0; i < 32; ++i) {
+                    local_id.value[i] = static_cast<uint8_t>(
+                        std::stoi(id_hex.substr(i * 2, 2), nullptr, 16));
+                }
+            }
+        }
+    }
+
+    // Register TCP transport
+    smo::TransportRegistry::instance().register_transport(
+        std::make_unique<smo::TcpTransport>(), "tcp");
+
+    // Parse seed address
+    smo::Endpoint seed_ep;
+    auto ep_result = smo::Endpoint::from_string(address);
+    if (!ep_result) {
+        std::fprintf(stderr, "Error: invalid address format (use host:port)\n");
+        return 1;
+    }
+    seed_ep = ep_result.value();
+
+    // Create MembershipTable and HealthMonitor for bootstrap
+    smo::MembershipTable table;
+    smo::HealthMonitor monitor;
+
+    std::printf("Connecting to seed: %s\n", address.c_str());
+    auto now = std::chrono::system_clock::to_time_t(
+        std::chrono::system_clock::now());
+    auto rec_result = smo::Bootstrap::find_seed(
+        {seed_ep},
+        smo::TransportRegistry::instance(),
+        local_id,
+        static_cast<int64_t>(now) * 1000000000LL);
+
+    if (!rec_result) {
+        std::fprintf(stderr, "Failed to connect to seed: %s\n",
+                     rec_result.error().message.c_str());
+        return 1;
+    }
+
+    // Bootstrap succeeded - seed returned its PeerRecord
+    auto& rec = rec_result.value();
+    std::printf("Seed responded: %s (%s)\n",
+                rec.display_name.c_str(),
+                rec.endpoint.to_string().c_str());
+
+    // Upsert seed into local membership
+    table.upsert(rec);
+    std::printf("Added seed to membership. Peers: %zu\n", table.count());
+
+    // TODO: Request full peer table from seed via DiscoverMsg
+    // For now just save seed record
     return 0;
 }
 
