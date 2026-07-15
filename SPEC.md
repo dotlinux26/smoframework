@@ -482,6 +482,404 @@ TRANSPORT LAYER
 
 **Key rule:** The Runtime and Protocol layers never touch Connectivity code. They receive a connected socket from the layer below.
 
+> **RFC 0027** defines the Network Layer (Bootstrap, Heartbeat, Gossip, PeerStore, MembershipSync) in detail. See [RFC/0027-network-layer.md](RFC/0027-network-layer.md).
+
+### 6.3.1 UDP Transport (Discovery + Heartbeat)
+
+SMO implements a dedicated **UDP transport** for the Discovery and Heartbeat protocols. This transport is separate from the TCP transport used by Control/Execution/Data protocols.
+
+```cpp
+namespace smo::network::udp {
+
+class UdpTransport : public Transport {
+public:
+    std::string_view name() const override { return "udp"; }
+    Result<ListenerPtr> listen(const Endpoint& ep) override;
+    Result<SessionPtr> connect(const Endpoint& ep) override;
+};
+
+class UdpSession : public TransportSession {
+public:
+    Result<void> send(BytesView data) override;       // sendto()
+    Result<Bytes> recv(size_t max_bytes) override;    // recvfrom()
+    Result<void> close() override;
+    Endpoint remote_endpoint() const override;
+    bool is_open() const override;
+};
+
+class UdpListener : public TransportListener {
+public:
+    Result<SessionPtr> accept() override;             // returns session per-peer
+    Result<void> close() override;
+    Endpoint local_endpoint() const override;
+};
+
+} // namespace smo::network::udp
+```
+
+**UDP Transport characteristics:**
+- Connectionless datagrams, no handshake
+- Non-blocking sockets with `epoll`/`poll` for scalability
+- Per-peer sessions created via `connect()` (sets default destination) or `accept()` (peels first packet from `recvfrom`)
+- Maximum payload: 65507 bytes (UDP max minus IP/UDP headers)
+- Used for: HELLO, PING/PONG, DISCOVER, NODE_INFO, GOSSIP, HEARTBEAT
+
+### 6.3.2 Heartbeat Service
+
+The **Heartbeat Service** (`core/network/udp/HeartbeatService`) runs on top of the UDP transport and provides liveness detection, RTT measurement, and failure detection.
+
+**Configuration:**
+```cpp
+struct HeartbeatConfig {
+    uint32_t ping_interval_ms = 5000;      // send PING every 5s
+    uint32_t ping_timeout_ms  = 3000;      // wait 3s for PONG
+    uint32_t max_misses       = 3;         // 3 misses = SUSPECT
+    uint32_t fanout           = 3;         // gossip fanout per round
+};
+```
+
+**Operation:**
+1. Every `ping_interval_ms`, send `PingMsg` to all `Online` peers via UDP
+2. `PingMsg` contains: `timestamp` (sender monotonic ns), `sequence` (monotonic per-sender)
+3. Receiver responds immediately with `PongMsg` echoing the timestamp
+4. Sender computes RTT = `now_ns - pong.timestamp`, updates peer `rtt_ms` (moving average)
+5. `HealthMonitor::tick()` advances state: `Online → Suspect → Offline` based on `max_misses`
+
+**RTT Usage:**
+- Selection Engine uses `rtt_ms` for `NEAREST` mode
+- Routing Layer uses `rtt_ms` for path cost
+- Trust Engine uses heartbeat success rate for Citizen Score
+
+### 6.3.3 Bootstrap Protocol (Seed Discovery)
+
+The **Bootstrap** mechanism connects a new node to the mesh using one or more **seed nodes**.
+
+**Seed Endpoints:**
+```cpp
+struct SeedEndpoint {
+    std::string host;       // hostname or IP
+    uint16_t    port = 7777; // TCP port for seed
+    bool        tls = false;
+};
+```
+
+**Bootstrap Flow (HELLO → WELCOME → SNAPSHOT):**
+
+```
+New Node (Private LAN)          Seed Node (Public IP)
+       │                            │
+       │ 1. TCP connect            │
+       │──────────────────────────▶│
+       │                            │
+       │ 2. HELLO (NodeID, proto)   │
+       │──────────────────────────▶│
+       │                            │
+       │ 3. WELCOME (PeerRecord)    │
+       │◀──────────────────────────│
+       │                            │
+       │ 4. DISCOVER (request table)│
+       │──────────────────────────▶│
+       │                            │
+       │ 5. NODE_INFO (full table)  │
+       │◀──────────────────────────│
+       │                            │
+       ▼                            ▼
+```
+
+**Bootstrap API:**
+```cpp
+class Bootstrap {
+public:
+    // Try each seed endpoint until one responds with WELCOME
+    static Result<PeerRecord> find_seed(
+        const std::vector<Endpoint>& seeds,
+        Transport& transport,
+        const NodeID& local_id,
+        int64_t now_ns);
+};
+```
+
+**Seed Selection:**
+- Try seeds in order (from Mesh Manifest or CLI `--seed`)
+- First successful WELCOME wins
+- If all fail → `BootstrapNoSeeds` error
+
+**After Bootstrap:**
+- Seed's `PeerRecord` added to local `MembershipTable`
+- Full peer table received via `DISCOVER`/`NODE_INFO`
+- Local `PeerStore` populated via `sync_from_membership()`
+- Gossip/Heartbeat services started
+
+### 6.3.4 Membership Sync (Event Bus)
+
+The **MembershipSync** (`core/network/sync/MembershipSync`) provides a typed event bus for all membership changes. It decouples network components from membership state.
+
+**Event Types:**
+```cpp
+enum class MembershipEventType : uint8_t {
+    PeerAdded        = 1,   // new peer discovered/bootstrapped
+    PeerRemoved      = 2,   // graceful OFFLINE or confirmed dead
+    PeerUpdated      = 3,   // role/cap/endpoint/rtt change
+    PeerRenamed      = 4,   // display_name change
+    CapabilityChange = 5,   // role/caps added/removed
+    CertificateRotate = 6,  // cert re-issued
+    StateChange      = 7,   // Online→Suspect→Offline transitions
+};
+```
+
+**MembershipEvent Payload:**
+```cpp
+struct MembershipEvent {
+    MembershipEventType type;
+    NodeID              node_id;
+    int64_t             timestamp_ns = 0;
+    uint64_t            sequence = 0;
+
+    // Event-specific fields
+    std::string old_display_name;
+    std::string new_display_name;
+    Role        new_role = Role::Reader;
+    std::vector<std::string> added_caps;
+    std::vector<std::string> removed_caps;
+    PeerState  new_state = PeerState::Unknown;
+    Certificate new_cert;
+};
+```
+
+**Publish/Subscribe:**
+```cpp
+class MembershipSync {
+public:
+    using Callback = std::function<void(const MembershipEvent&)>;
+
+    uint64_t subscribe(Callback cb);      // returns subscription_id
+    void unsubscribe(uint64_t id);
+
+    // Emit helpers (called by DiscoveryEngine, HeartbeatService, etc.)
+    void emit_peer_added(const PeerRecord& rec);
+    void emit_peer_removed(const NodeID& id);
+    void emit_peer_updated(const PeerRecord& old_rec, const PeerRecord& new_rec);
+    void emit_peer_renamed(const NodeID& id, const std::string& old, const std::string& nw);
+    void emit_capability_changed(const NodeID& id, Role old, Role nw,
+                                  const std::vector<std::string>& added,
+                                  const std::vector<std::string>& removed);
+    void emit_certificate_rotated(const NodeID& id, const Certificate& cert);
+    void emit_state_changed(const NodeID& id, PeerState old, PeerState nw, int misses);
+
+    // Gossip serialization
+    Bytes serialize_events(const std::vector<MembershipEvent>&) const;
+    Result<void> apply_events(const Bytes& data);
+    std::vector<MembershipEvent> pending_events(uint64_t since_seq) const;
+    void acknowledge(uint64_t seq);
+};
+```
+
+**Consumers:**
+- `HeartbeatService` → `emit_state_changed()`
+- `DiscoveryEngine` → `emit_peer_added()`, `emit_peer_removed()`
+- `GossipEngine` → `pending_events()` for push, `apply_events()` for pull
+- `PeerStore` → persistence of events for audit
+
+### 6.3.5 Gossip Engine (SWIM-Inspired)
+
+The **GossipEngine** (`core/network/gossip/GossipEngine`) implements epidemic membership dissemination using a SWIM-inspired protocol.
+
+**Configuration:**
+```cpp
+struct Config {
+    uint32_t interval_ms = 5000;   // gossip round interval
+    uint32_t fanout = 3;           // peers per round
+    uint32_t max_payload = 4096;   // max gossip message size
+};
+```
+
+**Gossip Message:**
+```cpp
+struct GossipMessage {
+    uint64_t incarnation;          // local generation counter
+    uint64_t sequence;             // monotonic per-sender
+    Bytes payload;                 // serialized MembershipEvent list
+};
+```
+
+**Operation:**
+1. Every `interval_ms`, `tick()` selects `fanout` random `Online` peers
+2. Sends `GossipMessage` with `pending_events()` since last sent
+3. On receive: `apply_updates()` → merges into `MembershipTable`
+4. Increments `incarnation` on local state change
+
+**Gossip Message Format:**
+```
+GossipMessage:
+  sender_id: NodeID
+  incarnation: uint64
+  sequence: uint64
+  events:
+    - type: MembershipEventType
+      node_id: NodeID
+      sequence: uint64
+      timestamp: int64
+      payload: event-specific
+```
+
+### 6.3.6 PeerStore (Persistent Peer Cache)
+
+The **PeerStore** (`core/discovery/PeerStore`) provides SQLite-backed persistent storage for peer records, surviving node restarts.
+
+**Schema (`peer.db`):**
+```sql
+CREATE TABLE peers (
+    node_id         BLOB PRIMARY KEY,           -- 32 bytes
+    display_name    TEXT NOT NULL DEFAULT '',
+    hostname        TEXT NOT NULL DEFAULT '',
+    mesh_name       TEXT NOT NULL DEFAULT '',
+    role            INTEGER NOT NULL DEFAULT 3,
+    tags            TEXT NOT NULL DEFAULT '[]', -- JSON array
+    platform        TEXT NOT NULL DEFAULT '',
+    arch            TEXT NOT NULL DEFAULT '',
+    version         TEXT NOT NULL DEFAULT '',
+    location        TEXT NOT NULL DEFAULT '',
+    aliases         TEXT NOT NULL DEFAULT '[]', -- JSON array
+    endpoint_scheme TEXT NOT NULL DEFAULT 'tcp',
+    endpoint_host   TEXT NOT NULL DEFAULT '',
+    endpoint_port   INTEGER NOT NULL DEFAULT 0,
+    state           INTEGER NOT NULL DEFAULT 0,
+    last_seen       INTEGER NOT NULL DEFAULT 0, -- unix ms
+    ping_misses     INTEGER NOT NULL DEFAULT 0,
+    rtt_ms          REAL NOT NULL DEFAULT 0.0,
+    created_at      INTEGER NOT NULL DEFAULT 0,
+    updated_at      INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE peer_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id         BLOB NOT NULL,
+    event_type      INTEGER NOT NULL,   -- MembershipEventType
+    payload         BLOB,               -- serialized event
+    created_at      INTEGER NOT NULL
+);
+
+CREATE INDEX idx_peers_display_name ON peers(display_name);
+CREATE INDEX idx_peers_state ON peers(state);
+CREATE INDEX idx_peers_role ON peers(role);
+CREATE INDEX idx_peers_mesh ON peers(mesh_name);
+```
+
+**PeerStore API:**
+```cpp
+class PeerStore {
+public:
+    Result<void> open(std::string_view base_path);  // opens peer.db
+    void close();
+
+    // CRUD
+    Result<void> upsert(const PeerRecord& rec);
+    Result<PeerRecord> lookup(const NodeID& id) const;
+    Result<PeerRecord> lookup_by_name(std::string_view name) const;
+    Result<std::vector<PeerRecord>> peers() const;
+    Result<void> remove(const NodeID& id);
+
+    // Filtered queries (for Selection Engine)
+    Result<std::vector<PeerRecord>> peers_by_role(Role role) const;
+    Result<std::vector<PeerRecord>> peers_by_tag(std::string_view tag) const;
+    Result<std::vector<PeerRecord>> peers_by_os(std::string_view os) const;
+    Result<std::vector<PeerRecord>> peers_by_arch(std::string_view arch) const;
+    Result<std::vector<PeerRecord>> peers_by_mesh(std::string_view mesh) const;
+    Result<std::vector<PeerRecord>> peers_by_state(PeerState state) const;
+
+    // Sync with in-memory MembershipTable
+    Result<void> sync_from_membership(const MembershipTable& table);
+    Result<void> sync_to_membership(MembershipTable& table) const;
+
+    // Events
+    Result<void> record_event(PeerEventType type, const NodeID& id, Bytes payload = {});
+    Result<std::vector<PeerEvent>> recent_events(int64_t since_id = 0) const;
+
+    Result<size_t> count() const;
+};
+```
+
+**Integration:**
+- On node startup: `PeerStore::open()` → `sync_to_membership()` → populates `MembershipTable`
+- On bootstrap: `sync_from_membership()` → persists seed + discovered peers
+- On membership events: `record_event()` → audit trail
+- On shutdown: `sync_from_membership()` → persists current state
+
+### 6.3.6 Transport Registry Integration
+
+All transports (TCP, UDP) register with the global `TransportRegistry`:
+
+```cpp
+smo::TransportRegistry::instance().register_transport(
+    std::make_unique<smo::TcpTransport>(), "tcp");
+smo::TransportRegistry::instance().register_transport(
+    std::make_unique<smo::network::udp::UdpTransport>(), "udp");
+```
+
+Scheme-based dispatch:
+```cpp
+// "tcp://1.2.3.4:7777" → TcpTransport
+// "udp://1.2.3.4:7777" → UdpTransport
+auto session = TransportRegistry::instance().connect(endpoint);
+```
+
+### 6.3.7 Network Layer Integration in smo-node Daemon
+
+The `smo-node` daemon integrates all network components:
+
+```cpp
+int main() {
+    // Core components
+    MembershipTable membership;
+    HealthMonitor health;
+    DiscoveryEngine discovery(membership, health);
+    PeerStore peer_store;
+    MembershipSync sync(membership, health);
+    GossipEngine gossip(membership);
+    HeartbeatService heartbeat(udp_transport, membership, health);
+
+    // Load persistent peers
+    peer_store.open(data_dir);
+    peer_store.sync_to_membership(membership);
+
+    // Register transports
+    TransportRegistry::instance().register_transport(
+        std::make_unique<TcpTransport>(), "tcp");
+    UdpTransport udp_transport;
+    TransportRegistry::instance().register_transport(
+        std::make_unique<UdpTransport>(), "udp");
+
+    // Start UDP listener
+    udp_transport.listen(Endpoint{"udp", "0.0.0.0", 0});
+
+    // Bootstrap if seed provided
+    if (seed_addr) {
+        auto rec = Bootstrap::find_seed(seeds, TransportRegistry::instance(), local_id, now);
+        if (rec) {
+            discovery.handle_welcome(WelcomeMsg{local_id, rec.value()}, now);
+            peer_store.sync_from_membership(membership);
+        }
+    }
+
+    // Main loop
+    while (running) {
+        now_ns = monotonic_now();
+        heartbeat.tick(now_ns);
+        gossip.tick(now_ns);
+        discovery.tick(now_ns);
+        health.tick(membership, now_ns);
+
+        // Accept TCP connections
+        auto session = tcp_listener->accept();
+        // Accept UDP packets
+        auto [udp_session, from] = udp_listener->recv_from(65536);
+        if (udp_session) {
+            parse_discovery_message(udp_session, from);
+        }
+    }
+}
+```
+
 ### 6.4 Crypto Suite ID
 
 SMO uses a **Crypto Suite ID** to achieve algorithm agility. The protocol NEVER references specific algorithms. It references Suite IDs. The mapping from Suite ID to concrete algorithms is a local configuration.

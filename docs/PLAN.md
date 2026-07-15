@@ -41,6 +41,175 @@ Fix E2E test failures, implement CSR signing, stabilize CLI, create `core/networ
 
 ---
 
+## Sprint 4 — Network Layer (2026-07-16)
+
+### Completed
+
+| Task | Status |
+|------|--------|
+| 4.1 PeerStore (SQLite) — persistent peer cache | ✅ |
+| 4.2 Bootstrap integration — real seed connect | ✅ |
+| 4.3 UDP Transport + HeartbeatService | ✅ |
+| 4.4 MembershipSync — typed event bus | ✅ |
+| 4.5 GossipEngine — SWIM epidemic membership | ✅ |
+| 4.6 CLI + Selector wiring — `exec`/`select` via Selector | ✅ |
+
+### Sprint 4 Summary
+
+| Component | Files | Purpose |
+|-----------|-------|---------|
+| PeerStore | `core/discovery/peer_store.{hpp,cpp}` | SQLite persistent peer cache, filtered queries, event log |
+| Bootstrap | `core/discovery/discovery.cpp::Bootstrap::find_seed` | HELLO/WELCOME/DISCOVER/NODE_INFO handshake |
+| UDP Transport | `core/network/udp/udp_transport.{hpp,cpp}` | Connectionless UDP sessions, listener, connect |
+| HeartbeatService | `core/network/udp/heartbeat_service.{hpp,cpp}` | PING/PONG, RTT, HealthMonitor integration |
+| MembershipSync | `core/network/sync/membership_sync.{hpp,cpp}` | Typed event bus: PeerAdded/Removed/Updated/Renamed |
+| GossipEngine | `core/discovery/gossip.{hpp,cpp}` | SWIM epidemic membership sync, fanout |
+| CLI Selector | `cmd/smo-cli/main.cpp::cmd_exec` | `exec --name/--role/--where --dry-run` → Selector → NodeSet |
+| Daemon | `cmd/smo-node/main.cpp` | Bootstrap + MembershipTable + DiscoveryEngine + Heartbeat + Gossip |
+
+### Architecture Update
+
+Network Layer inserted between Connectivity and Session:
+```
+CONNECTIVITY (STUN/ICE) → NETWORK (Bootstrap/Sync/Heartbeat/Gossip/PeerStore)
+                                          ↓
+                              MembershipTable + PeerRecord
+                                          ↓
+                              Selector → NodeSet → Runtime Dispatch
+```
+
+---
+
+### Phase 5 — Discovery (Completion)
+
+| Task | File |
+|------|------|
+| handle_ping/handle_pong from no-op → real response | core/discovery/discovery.cpp |
+| Gossip piggyback membership | core/discovery/gossip.hpp/.cpp (done) |
+| Seed priority fallback | core/discovery/discovery.cpp |
+
+---
+
+### Phase 6 — Tests
+
+| Test | Scope |
+|------|-------|
+| Parser round-trip | JSON → AST → JSON |
+| SMIR lowering | AST → SMIR correctness |
+| Semantic Validator | ABI hash mismatch, missing capability |
+| Planner | Node selection logic |
+| Builder → DAG | DAG structure, dependency edges |
+| Final Validator | Cycle rejection, max depth overflow |
+| Compiler integration | Intent → DAG (full pipeline) |
+| Executor dispatch | Kernel contracts via Runtime::execute() |
+| Discovery | Ping/pong, gossip propagation |
+| Bootstrap integration | Seed connect → peer table |
+| Heartbeat + RTT | PING/PONG → RTT update |
+| Gossip propagation | Event fanout → remote membership update |
+| Selector dry-run | `smo exec --name X --dry-run` → NodeSet |
+
+---
+
+### Phase 7 — Network Layer Hardening (Post-Sprint 4)
+
+| Task | Scope |
+|------|-------|
+| STUN client (RFC 8489) | `transport/stun/` |
+| ICE candidate gathering (RFC 8445) | `transport/ice/` |
+| UDP hole punch (NAT traversal) | `transport/nat/` |
+| TURN relay (RFC 8656) | `transport/relay/` |
+| PeerStore vacuum/retention | GC old peer_events |
+| Gossip compression | Delta sync for large meshes |
+
+---
+
+### Phase 8 — NAT Traversal (Tier 2)
+
+| Task | Scope |
+|------|-------|
+| STUN client implementation | `transport/stun/client.cpp` |
+| ICE candidate gathering | `transport/ice/gatherer.cpp` |
+| UDP hole punch | `transport/nat/punch.cpp` |
+| TURN relay | `transport/relay/turn.cpp` |
+
+---
+
+### Phase 9 — Mesh Governance & Recovery
+
+| Task | Scope |
+|------|-------|
+| Mesh manifest signing | `cmd/smo-admin` |
+| Authority rotation | `smo mesh authority add/revoke` |
+| Epoch increment | `smo mesh epoch increment` |
+| Recovery package | `smo mesh recover` |
+
+---
+
+### Changes from Original Plan
+
+| Old Plan | Final Plan |
+|----------|-----------|
+| 4 RFCs (0025-0028) | 2 RFCs (0025-0026) |
+| JSON → Parser → DAG | JSON → AST → SMIR → Planner → DAG |
+| Validator 1 pass | Validator 2 passes (Semantic + Final) |
+| Kernel contracts Sprint 4 | Kernel contracts Sprint 3 |
+| No Contract ABI | Contract ABI + ABI Hash is first-class |
+| No Runtime::execute() | Single `Runtime::execute(ContractID, ExecutionContext)` |
+| Kernel may hardcode opcodes | **Polymorphic registration, zero hardcode** |
+| Discovery MVP only | **Full Network Layer (Bootstrap/Sync/Heartbeat/Gossip/PeerStore)** |
+| Single-node framework | **Distributed mesh runtime with Selection Engine** |
+
+---
+
+### Key Interfaces
+
+```cpp
+// The single runtime entry point
+ExecutionResult Runtime::execute(const ContractID&, const ExecutionContext&);
+
+// Contract ABI
+struct ContractABI {
+    uint32_t abi_version;
+    Schema input_schema;
+    Schema output_schema;
+    CapabilityMask capability_mask;
+    std::vector<OpcodeID> opcode_dependencies;
+    Hash256 abi_hash;       // BLAKE3(canonical_abi_json)
+    Hash256 semantic_hash;  // BLAKE3(abi_hash + contract_json)
+    Version min_runtime_version;
+    Version max_runtime_version;
+};
+
+// Compiler pipeline
+struct Compiler {
+    Result<ExecutionGraph> compile(const Intent&, const ContractDefinition&);
+};
+
+// Executor (ignorant of contract category)
+struct Executor {
+    Result<ExecutionResult> execute(const ExecutionGraph&, const Session&);
+};
+
+// Selection Engine
+namespace smo::select {
+    Result<NodeSet> select(const MembershipTable&, const SelectQuery&);
+}
+
+// PeerStore
+class PeerStore {
+    Result<void> open(std::string_view path);
+    Result<void> upsert(const PeerRecord&);
+    Result<PeerRecord> lookup(const NodeID&);
+    Result<PeerRecord> lookup_by_name(std::string_view);
+    Result<std::vector<PeerRecord>> peers_by_role(Role);
+    Result<std::vector<PeerRecord>> peers_by_tag(std::string_view);
+    Result<void> sync_from_membership(const MembershipTable&);
+    Result<void> sync_to_membership(MembershipTable&) const;
+};
+```
+
+---
+
 ### Phase 1 — RFCs
 
 | RFC | Title | Content |

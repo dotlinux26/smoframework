@@ -168,6 +168,82 @@ This layer is optional for LAN deployments and mandatory for WAN/Internet meshes
 No third-party networking libraries. All STUN/ICE/TURN are implemented from RFCs. The Connectivity Layer is the only component that touches NAT; everything above it assumes a working session.
 
 ---
+## Why Network Layer?
+
+The Network Layer sits between Connectivity and Session layers. It provides **distributed membership services** that transform raw connectivity into a usable mesh.
+
+```
+CONNECTIVITY LAYER
+  (STUN/ICE/TURN → produces connected sockets)
+       │
+       ▼
+NETWORK LAYER
+  Bootstrap          — Seed resolution, HELLO/WELCOME, peer table fetch
+  Membership Sync    — Typed event bus: PeerAdded/Removed/Updated/Renamed
+  Heartbeat (UDP)    — PING/PONG, RTT measurement, failure detection
+  Gossip (UDP)       — SWIM epidemic membership propagation
+  PeerStore (SQLite) — Persistent peer cache, survives restarts
+       │
+       ▼
+SESSION LAYER
+  (keys, certs, signed nonce)
+```
+
+**Why separate Network from Connectivity?**
+- Connectivity only cares about "can I reach this IP:port". It knows nothing about peer identity, roles, or mesh membership.
+- Network Layer owns the **Membership Table** — the authoritative view of the mesh. It maps NodeIDs to endpoints, tracks state (Online/Suspect/Offline), and exports a `PeerRecord` for the Selection Engine.
+- All upper layers (Selection Engine, Runtime, Trust Engine) consume `MembershipTable` / `PeerRecord`. They never touch UDP sockets or bootstrap logic directly.
+
+**Components:**
+1. **Bootstrap** — `Bootstrap::find_seed()` connects to seed nodes, performs HELLO→WELCOME→DISCOVER→NODE_INFO handshake, returns initial peer table.
+2. **MembershipSync** — Typed event bus (`PeerAdded`, `PeerRemoved`, `PeerUpdated`, `PeerRenamed`, `CapabilityChange`, `CertificateRotate`, `StateChange`). Publishes to GossipEngine, persists to PeerStore, notifies subscribers (Heartbeat, SelectionEngine).
+3. **HeartbeatService** — Runs on UDP transport. Periodic PING to all `Online` peers. Measures RTT (moving average). Feeds `HealthMonitor` for suspicion/offline transitions. RTT feeds Selection Engine `NEAREST` mode.
+4. **GossipEngine** — SWIM-inspired epidemic protocol. Periodic fanout to random peers. Payload = serialized `MembershipEvent` list. Increments `incarnation` on local state change. Resilient to partitions, eventual consistency.
+5. **PeerStore** — SQLite-backed persistent cache (`peer.db`). Schema: `peers` table with full `PeerRecord` columns, `peer_events` for audit. Methods: CRUD, filtered queries (by role/tag/OS/arch/mesh/state), sync with `MembershipTable`, event log.
+
+**Integration in `smo-node`:**
+```cpp
+MembershipTable membership;
+HealthMonitor health;
+DiscoveryEngine discovery(membership, health);
+PeerStore peer_store;
+MembershipSync sync(membership, health);
+GossipEngine gossip(membership);
+HeartbeatService heartbeat(udp_transport, membership, health);
+
+peer_store.open(data_dir);
+peer_store.sync_to_membership(membership);
+
+// Register transports
+TransportRegistry::instance().register_transport(std::make_unique<TcpTransport>(), "tcp");
+UdpTransport udp_transport;
+TransportRegistry::instance().register_transport(std::make_unique<UdpTransport>(), "udp");
+
+// Bootstrap
+if (seed_addr) {
+    auto rec = Bootstrap::find_seed(seeds, TransportRegistry::instance(), local_id, now);
+    if (rec) {
+        discovery.handle_welcome(WelcomeMsg{local_id, *rec}, now);
+        peer_store.sync_from_membership(membership);
+    }
+}
+
+// Main loop
+while (running) {
+    now_ns = monotonic_now();
+    heartbeat.tick(now_ns);
+    gossip.tick(now_ns);
+    discovery.tick(now_ns);
+    health.tick(membership, now_ns);
+
+    // Accept TCP + UDP
+    auto tcp_session = tcp_listener->accept();
+    auto [udp_session, from] = udp_listener->recv_from(65536);
+    if (udp_session) parse_discovery_message(udp_session, from);
+}
+```
+
+---
 
 ## Why Session Binding (Two-Factor)?
 
@@ -197,6 +273,13 @@ COMPILER + SCHEDULER + FSM
   │  DATA PROTOCOL     (TCP)    │
   ├──────────────────────────────┤
   │  SESSION + CERTIFICATE       │
+  ├──────────────────────────────┤
+  │  NETWORK LAYER               │
+  │   ├── Bootstrap              │  Seed resolution, HELLO/WELCOME
+  │   ├── Membership Sync        │  Event bus for membership changes
+  │   ├── Heartbeat (UDP)        │  PING/PONG, RTT, failure detection
+  │   ├── Gossip (UDP)           │  SWIM epidemic membership sync
+  │   └── PeerStore (SQLite)     │  Persistent peer cache
   ├──────────────────────────────┤
   │  CONNECTIVITY (STUN/ICE)     │
   ├──────────────────────────────┤
