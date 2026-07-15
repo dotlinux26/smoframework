@@ -1,5 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg"
      viewBox="0 0 128 128"
+     width="256" 
+     height="256"
      fill="none">
   <defs>
     <linearGradient id="nodeAnchorGrad" x1="0" y1="0" x2="128" y2="0" gradientUnits="userSpaceOnUse">
@@ -14,19 +16,19 @@
      stroke-linecap="round"
      stroke-linejoin="round">
 
-    <circle cx="64" cy="21" r="8"/>
+    <circle cx="64" cy="28" r="8"/>
 
-    <path d="M64 29V101"/>
+    <path d="M64 36V108"/>
 
-    <path d="M44 45H84"/>
+    <path d="M44 52H84"/>
 
-    <path d="M30 67 
-             C30 87 46 101 64 101
-             C82 101 98 87 98 67
-             C98 85 86 93 74 89
-             L64 101
-             L54 89
-             C42 93 30 85 30 67 Z" 
+    <path d="M30 74 
+             C30 94 46 108 64 108
+             C82 108 98 94 98 74
+             C98 92 86 100 74 96
+             L64 108
+             L54 96
+             C42 100 30 92 30 74 Z" 
           fill="url(#nodeAnchorGrad)" />
 
   </g>
