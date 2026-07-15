@@ -1,0 +1,85 @@
+version: "3.9"
+
+networks:
+  smo-mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+services:
+  node-a:
+    build:
+      context: ../../
+      dockerfile: deployments/demo/Dockerfile
+    hostname: node-a
+    container_name: smo-node-a
+    networks:
+      smo-mesh:
+        ipv4_address: 172.20.0.10
+    ports:
+      - "7777:7777"
+    environment:
+      SMO_NODE_NAME: "soc-hn-01"
+      SMO_NODE_ROLE: "Authority"
+      SMO_NODE_PORT: "7777"
+      SMO_MESH_NAME: "SOC-Production"
+      SMO_IS_AUTHORITY: "true"
+    volumes:
+      - smo-data-a:/var/lib/smo
+      - smo-etc-a:/etc/smo
+    cap_add:
+      - NET_ADMIN
+    command: ["node-a"]
+
+  node-b:
+    build:
+      context: ../../
+      dockerfile: deployments/demo/Dockerfile
+    hostname: node-b
+    container_name: smo-node-b
+    networks:
+      smo-mesh:
+        ipv4_address: 172.20.0.11
+    environment:
+      SMO_NODE_NAME: "backup-02"
+      SMO_NODE_ROLE: "Member"
+      SMO_NODE_PORT: "7777"
+      SMO_MESH_NAME: "SOC-Production"
+      SMO_SEED_NODE: "node-a:7777"
+    volumes:
+      - smo-data-b:/var/lib/smo
+      - smo-etc-b:/etc/smo
+    cap_add:
+      - NET_ADMIN
+    command: ["node-b"]
+
+  node-c:
+    build:
+      context: ../../
+      dockerfile: deployments/demo/Dockerfile
+    hostname: node-c
+    container_name: smo-node-c
+    networks:
+      smo-mesh:
+        ipv4_address: 172.20.0.12
+    environment:
+      SMO_NODE_NAME: "vpn-gateway"
+      SMO_NODE_ROLE: "Contributor"
+      SMO_NODE_PORT: "7777"
+      SMO_MESH_NAME: "SOC-Production"
+      SMO_SEED_NODE: "node-a:7777"
+    volumes:
+      - smo-data-c:/var/lib/smo
+      - smo-etc-c:/etc/smo
+    cap_add:
+      - NET_ADMIN
+    command: ["node-c"]
+
+volumes:
+  smo-data-a:
+  smo-data-b:
+  smo-data-c:
+  smo-etc-a:
+  smo-etc-b:
+  smo-etc-c:
