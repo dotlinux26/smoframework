@@ -33,11 +33,55 @@ phase_init() {
         else
             log "Mesh already exists at $MESH_DIR"
         fi
+
+        # Publish mesh (configure bootstrap endpoints)
+        log "Publishing mesh..."
+        smo-admin --mesh-dir "$MESH_DIR" mesh publish --port "$NODE_PORT" || true
+
+        log "Mesh published. Other nodes can now join."
+    fi
+}
+
+phase_enroll() {
+    if [ "$IS_AUTHORITY" = "true" ]; then
+        return 0
+    fi
+
+    log "=== Phase 2: Enrollment ==="
+    log "Waiting for mesh to be published by authority..."
+
+    # Wait for mesh.json to appear (authority publishes it)
+    local timeout=60
+    while [ ! -f "$MESH_DIR/mesh.json" ] && [ $timeout -gt 0 ]; do
+        sleep 1
+        timeout=$((timeout - 1))
+    done
+
+    if [ ! -f "$MESH_DIR/mesh.json" ]; then
+        log "Warning: Mesh not published yet, will rely on seed for bootstrap"
+        return 0
+    fi
+
+    # Export CSR
+    log "Exporting CSR for signing..."
+    smo-node --export "$SMO_DATA/node.csr.smor" --data "$SMO_DATA"
+
+    # Sign CSR via authority (copy to authority mesh dir and sign)
+    # In demo, authority mesh dir is shared via volume or we copy
+    local authority_mesh_dir="/tmp/authority-mesh"
+    if [ -f "$authority_mesh_dir/mesh.json" ]; then
+        log "Signing CSR with authority..."
+        smo-admin --mesh-dir "$authority_mesh_dir" sign "$SMO_DATA/node.csr.smor" -o "$SMO_DATA/node.cert.smoc"
+
+        log "Importing certificate..."
+        smo-node --import "$SMO_DATA/node.cert.smoc" --data "$SMO_DATA"
+    else
+        log "Authority mesh dir not found at $authority_mesh_dir, will use seed bootstrap"
     fi
 }
 
 phase_ready() {
-    log "=== Phase 2: Starting Daemon ==="
+    log "=== Phase 3: Starting Daemon ==="
     local daemon_args="--daemon --port $NODE_PORT --data $SMO_DATA --name $NODE_NAME"
     if [ -n "$SEED_NODE" ]; then
         daemon_args="$daemon_args --seed $SEED_NODE"
@@ -49,6 +93,7 @@ phase_ready() {
 case "${1:-}" in
     node-a|node-b|node-c)
         phase_init
+        phase_enroll
         phase_ready
         ;;
     test)
