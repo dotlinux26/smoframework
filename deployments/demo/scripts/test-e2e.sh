@@ -62,7 +62,7 @@ echo "Node: $(hostname)"
 echo "Date: $(date)"
 echo ""
 
-# Find the actual mesh directory created by entrypoint
+# Find the mesh directory created by entrypoint (has authority keys)
 ACTUAL_MESH_DIR=$(find /var/lib/smo-mesh/meshes -maxdepth 1 -mindepth 1 -type d | head -1)
 if [ -z "$ACTUAL_MESH_DIR" ]; then
     echo "ERROR: No mesh directory found in /var/lib/smo-mesh/meshes/"
@@ -82,12 +82,13 @@ do_verify "smo-node --help"        "smo-node --help 2>&1" "Usage"
 do_verify "smo-cli --help"         "smo-cli --help 2>&1" "Usage"
 do_verify "smo help"               "smo help 2>&1" "Usage"
 
-# ── Phase 2: Mesh Creation ─────────────────────────────
-step "2/6  Mesh — Create"
+# ── Phase 2: Mesh Verification ─────────────────────────────
+step "2/6  Mesh — Verify"
 
-do_verify "Create mesh"            "smo-admin --mesh-dir $MESH_DIR create-mesh testnet 2>&1" "Root public key"
 do_verify "mesh.json exists"       "test -f $MESH_DIR/mesh.json && echo OK" "OK"
-do_verify "mesh.json has hmac"     "grep hmac_secret $MESH_DIR/mesh.json" "hmac_secret"
+do_verify "mesh.json has hmac"       "grep hmac_secret $MESH_DIR/mesh.json" "hmac_secret"
+do_verify "mesh.json has authority_pubkey" "grep authority_pubkey $MESH_DIR/mesh.json | grep -v '\"\"'" "authority_pubkey"
+do_verify "mesh.json has root_pubkey" "grep root_pubkey $MESH_DIR/mesh.json | grep -v '\"\"'" "root_pubkey"
 
 # ── Phase 3: Node Identity ─────────────────────────────
 step "3/6  Node — Identity & CSR"
@@ -133,6 +134,25 @@ if kill -0 $DAEMON_PID 2>/dev/null; then
     pass "Daemon stopped cleanly"
 else
     fail "Daemon failed to start"
+fi
+
+# ── Final Summary ──────────────────────────────────────
+echo ""
+echo "╔══════════════════════════════════════════════════╗"
+echo "║                 TEST RESULTS                     ║"
+echo "╠══════════════════════════════════════════════════╣"
+printf "║  ${GREEN}PASS: %-3d${NC}  ${RED}FAIL: %-3d${NC}  Total: %-3d             ║\n" $PASS $FAIL $((PASS + FAIL))
+echo "╚══════════════════════════════════════════════════╝"
+echo ""
+
+rm -rf "$SMO_DATA"
+
+if [ "$FAIL" -eq 0 ]; then
+    echo -e "${GREEN}ALL TESTS PASSED${NC}"
+    exit 0
+else
+    echo -e "${RED}$FAIL TEST(S) FAILED${NC}"
+    exit 1
 fi
 
 # ── Final Summary ──────────────────────────────────────
