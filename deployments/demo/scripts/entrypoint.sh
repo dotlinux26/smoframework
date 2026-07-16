@@ -10,8 +10,6 @@ IS_AUTHORITY="${SMO_IS_AUTHORITY:-false}"
 
 SMO_DATA="/var/lib/smo"
 SMO_ETC="/etc/smo"
-IDENTITY_FILE="${SMO_DATA}/identity.json"
-CERT_FILE="${SMO_DATA}/certificate.json"
 
 mkdir -p "$SMO_DATA" "$SMO_ETC"
 
@@ -19,26 +17,22 @@ log() { echo "[$(date +%H:%M:%S)] $*"; }
 
 phase_init() {
     log "=== Phase 1: Node Init ==="
-    if [ -f "$IDENTITY_FILE" ]; then
-        log "Identity exists — skipping init"
-    else
-        log "Initializing node: $NODE_NAME (role: $NODE_ROLE)"
-        smo node init --name "$NODE_NAME"
-        echo "{\"name\":\"$NODE_NAME\",\"role\":\"$NODE_ROLE\",\"port\":$NODE_PORT,\"mesh\":\"$MESH_NAME\"}" > "$SMO_DATA/node.json"
-    fi
+    log "Node: $NODE_NAME, Role: $NODE_ROLE, Mesh: $MESH_NAME"
+    log "SMO runtime identity managed by smo-node daemon"
 }
 
-phase_discover() {
-    log "=== Phase 2: Discovery ==="
+phase_mesh() {
+    log "=== Phase 2: Mesh Setup ==="
     if [ "$IS_AUTHORITY" = "true" ]; then
-        log "This node is the mesh Authority — waiting for peers..."
-        smo discover --wait 30
+        log "This node is the mesh Authority"
+        smo mesh --create "$MESH_NAME" || log "Mesh may already exist"
+        smo mesh --use "$MESH_NAME" || true
     else
+        smo mesh --use "$MESH_NAME" 2>/dev/null || log "Mesh not local — will join via seed"
         if [ -n "$SEED_NODE" ]; then
             log "Connecting to seed: $SEED_NODE"
-            smo node connect --address "$SEED_NODE"
             sleep 2
-            smo discover
+            smo connect "$SEED_NODE" || log "Connect will work after daemon starts"
         fi
     fi
 }
@@ -57,10 +51,9 @@ phase_ready() {
 case "${1:-}" in
     node-a|node-b|node-c)
         phase_init
-        phase_discover
+        phase_mesh
         phase_ready
 
-        # Keep running
         if command -v smo-node &>/dev/null; then
             exec smo-node --daemon --port "$NODE_PORT" --data "$SMO_DATA"
         else

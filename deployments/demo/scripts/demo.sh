@@ -100,9 +100,9 @@ case "$ACTION" in
         ;;
 
     discover)
-        step "Discovery table on node-a..."
-        cmd $DOCKER_COMPOSE -f "$COMPOSE_FILE" exec node-a smo discover --full 2>/dev/null || \
-            echo "(Discovery table — waiting for daemon)"
+        step "Mesh status on node-a..."
+        cmd $DOCKER_COMPOSE -f "$COMPOSE_FILE" exec node-a smo mesh --list 2>/dev/null || \
+            echo "(Mesh listing — waiting for daemon)"
         ;;
 
     exec)
