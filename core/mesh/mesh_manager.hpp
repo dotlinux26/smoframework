@@ -11,6 +11,7 @@
 #include "core/errors/error.hpp"
 #include "core/contract/contract.hpp"
 #include "core/acl/policy_engine.hpp"
+#include "core/crypto/suite.hpp"
 #include "core/crypto/impl.hpp"
 
 namespace smo {
@@ -24,6 +25,12 @@ struct MeshConfig {
     CryptoSuiteID cipher_suite_id = kSuitePurePQC;  // default: Suite3 PurePQC
     int64_t epoch = 1;
     int64_t created_at = 0;
+
+    // Network configuration (set via mesh publish)
+    std::string listen_address = "0.0.0.0:7777";
+    std::vector<std::string> advertise_addresses;
+    std::vector<std::string> bootstrap_endpoints;
+    bool bootstrap_configured = false;
 };
 
 struct MeshPaths {
@@ -45,16 +52,17 @@ struct MeshContext {
     MeshConfig config;
     std::string display_name;
     MeshPaths paths;
+    MeshContext() = default;
 };
 
 class MeshManager {
 public:
     struct Config {
-        std::string base_data_dir;
+        std::string base_data_dir = "";
         std::string default_mesh_name = "default";
     };
 
-    explicit MeshManager(const Config& config = {});
+    explicit MeshManager(const Config& config);
     ~MeshManager();
 
     MeshManager(const MeshManager&) = delete;
@@ -70,8 +78,9 @@ public:
     Result<void> leave_mesh(const std::string& mesh_id);
     Result<void> switch_mesh(const std::string& mesh_id_or_name);
 
-    // Access
+// Access
     Result<std::shared_ptr<MeshContext>> get_mesh(const std::string& mesh_id);
+    Result<std::shared_ptr<MeshContext>> get_mesh_by_name(const std::string& display_name);
     Result<std::shared_ptr<MeshContext>> get_current_mesh() const;
     std::vector<std::string> list_meshes() const;
     std::string get_current_mesh_id() const;
@@ -93,6 +102,16 @@ public:
         const std::string& role,
         const std::string& expiry_duration,
         const std::vector<std::string>& bootstrap_endpoints = {});
+
+    // Publish: configure bootstrap endpoints after mesh creation
+    Result<void> publish_mesh(
+        const std::string& mesh_id,
+        const std::string& listen_address,
+        const std::vector<std::string>& advertise_addresses,
+        const std::vector<std::string>& bootstrap_endpoints);
+
+    // Load full MeshConfig from mesh.json (used by smo-admin)
+    static Result<MeshConfig> load_mesh_config(const std::string& mesh_dir);
 
 private:
     class Impl;

@@ -88,6 +88,12 @@ Bytes Certificate::serialize() const {
     return out;
 }
 
+Bytes Certificate::serialize_full() const {
+    Bytes out = serialize();
+    append_bytes(out, signature);
+    return out;
+}
+
 Result<Certificate> Certificate::deserialize(BytesView data) {
     Certificate cert;
     size_t offset = 0;
@@ -130,6 +136,13 @@ Result<Certificate> Certificate::deserialize(BytesView data) {
                             "failed to parse not_after");
     cert.not_before = static_cast<int64_t>(nb);
     cert.not_after  = static_cast<int64_t>(na);
+
+    // Read signature (optional for backward compatibility)
+    if (offset < data.size()) {
+        if (!read_bytes(data, offset, cert.signature))
+            return SMO_ERR_CERT(203, Error, NoRetry, Reenroll,
+                                "failed to parse signature");
+    }
 
     return cert;
 }
@@ -217,6 +230,12 @@ bool CertificateChain::is_valid_at(int64_t timestamp) const noexcept {
 // ---------------------------------------------------------------------------
 
 Bytes CertificateSigningRequest::serialize() const {
+    Bytes out = serialize_body();
+    append_bytes(out, signature);
+    return out;
+}
+
+Bytes CertificateSigningRequest::serialize_body() const {
     Bytes out;
     append_bytes(out, new_public_key);
     append_bytes(out, mesh_id);
@@ -267,6 +286,11 @@ Result<CertificateSigningRequest> CertificateSigningRequest::deserialize(
                             "failed to parse CSR timestamp");
     csr.timestamp = static_cast<int64_t>(ts);
 
+    // Read signature
+    if (!read_bytes(data, offset, csr.signature))
+        return SMO_ERR_CERT(209, Alert, NoRetry, None,
+                            "failed to parse CSR signature");
+
     return csr;
 }
 
@@ -276,13 +300,13 @@ Result<bool> CertificateSigningRequest::verify(
         return SMO_ERR_CERT(209, Alert, NoRetry, None,
                             "CSR has no signature");
     }
-    auto body = serialize();
+    auto body = serialize_body();
     return signer.verify(body, signature, signer_pubkey);
 }
 
 Result<void> CertificateSigningRequest::sign(
     const SignerImpl& signer, BytesView secret_key, RngRef& rng) {
-    auto body = serialize();
+    auto body = serialize_body();
     auto sig = signer.sign(body, secret_key, rng);
     if (!sig) return sig.error();
     signature = std::move(sig.value());

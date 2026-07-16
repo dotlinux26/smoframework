@@ -67,6 +67,9 @@ public:
     // Serialize all fields except signature into canonical bytes.
     Bytes serialize() const;
 
+    // Serialize all fields INCLUDING signature for wire/storage format.
+    Bytes serialize_full() const;
+
     // Deserialize from canonical bytes. Returns error if malformed.
     static Result<Certificate> deserialize(BytesView data);
 
@@ -120,6 +123,9 @@ public:
 
     // Serialize all fields except signature
     Bytes serialize() const;
+
+    // Serialize body only (without signature) for signing/verification
+    Bytes serialize_body() const;
 
     // Deserialize from canonical bytes
     static Result<CertificateSigningRequest> deserialize(BytesView data);

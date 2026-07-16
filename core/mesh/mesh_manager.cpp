@@ -3,6 +3,8 @@
 #include "core/crypto/registry.hpp"
 #include "core/enroll/join_token.hpp"
 
+#include <blake3.h>
+
 #include <filesystem>
 #include <sqlite3.h>
 #include <chrono>
@@ -14,6 +16,31 @@
 #include <fstream>
 
 namespace smo {
+
+// Simple JSON field readers (no JSON library dependency)
+static std::string json_read_string(const std::string& json, const std::string& key) {
+    auto pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return {};
+    auto colon = json.find(':', pos);
+    if (colon == std::string::npos) return {};
+    auto start = json.find('"', colon + 1);
+    if (start == std::string::npos) return {};
+    auto end = json.find('"', start + 1);
+    if (end == std::string::npos) return {};
+    return json.substr(start + 1, end - start - 1);
+}
+
+static int64_t json_read_int(const std::string& json, const std::string& key, int64_t def) {
+    auto pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return def;
+    auto colon = json.find(':', pos);
+    if (colon == std::string::npos) return def;
+    auto start = json.find_first_of("0123456789-", colon);
+    if (start == std::string::npos) return def;
+    auto end = json.find_first_not_of("0123456789", start);
+    if (end == std::string::npos) return def;
+    try { return std::stoll(json.substr(start, end - start)); } catch (...) { return def; }
+}
 
 static const char kMeshSchema[] = R"(
     CREATE TABLE IF NOT EXISTS meshes (
@@ -70,16 +97,45 @@ static void ensure_dirs(const MeshPaths& p) {
     std::filesystem::create_directories(p.workflow_dir, ec);
 }
 
+static std::string escape_json(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    for (char c : s) {
+        if (c == '"') out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else if (c == '\n') out += "\\n";
+        else out += c;
+    }
+    return out;
+}
+
 static std::string serialize_config(const MeshConfig& config) {
     std::ostringstream oss;
     oss << "{";
-    oss << "\"display_name\":\"" << config.display_name << "\",";
+    oss << "\"mesh_id\":\"" << escape_json(config.mesh_id) << "\",";
+    oss << "\"display_name\":\"" << escape_json(config.display_name) << "\",";
     oss << "\"authority_pubkey\":\"" << config.authority_pubkey << "\",";
     oss << "\"root_pubkey\":\"" << config.root_pubkey << "\",";
     oss << "\"hmac_secret\":\"" << config.hmac_secret << "\",";
     oss << "\"cipher_suite_id\":" << (int)config.cipher_suite_id << ",";
     oss << "\"epoch\":" << config.epoch << ",";
-    oss << "\"created_at\":" << config.created_at;
+    oss << "\"created_at\":" << config.created_at << ",";
+    oss << "\"listen_address\":\"" << escape_json(config.listen_address) << "\",";
+    oss << "\"bootstrap_configured\":" << (config.bootstrap_configured ? "true" : "false") << ",";
+    // advertise_addresses array
+    oss << "\"advertise_addresses\":[";
+    for (size_t i = 0; i < config.advertise_addresses.size(); ++i) {
+        if (i > 0) oss << ",";
+        oss << "\"" << escape_json(config.advertise_addresses[i]) << "\"";
+    }
+    oss << "],";
+    // bootstrap_endpoints array
+    oss << "\"bootstrap_endpoints\":[";
+    for (size_t i = 0; i < config.bootstrap_endpoints.size(); ++i) {
+        if (i > 0) oss << ",";
+        oss << "\"" << escape_json(config.bootstrap_endpoints[i]) << "\"";
+    }
+    oss << "]";
     oss << "}";
     return oss.str();
 }
@@ -149,6 +205,7 @@ public:
         }
 
         std::string mesh_id = cfg.mesh_id.empty() ? generate_mesh_id(cfg) : cfg.mesh_id;
+        cfg.mesh_id = mesh_id;  // Store the generated mesh_id in the config
         auto exists = find_mesh(mesh_id, name);
         if (exists) {
             return SMO_ERR_STORAGE(902, Warn, NoRetry, None, "Mesh already exists");
@@ -227,7 +284,7 @@ public:
         return ctx;
     }
 
-    std::shared_ptr<MeshContext> load_mesh_context(const std::string& mesh_id) {
+    std::shared_ptr<MeshContext> load_mesh_context(const std::string& mesh_id) const {
         std::string sql = "SELECT display_name, config_json FROM meshes WHERE mesh_id = ?";
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return nullptr;
@@ -237,10 +294,77 @@ public:
             ctx = std::make_shared<MeshContext>();
             ctx->config.mesh_id = mesh_id;
             ctx->display_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            ctx->config.display_name = ctx->display_name;  // Keep config in sync
             ctx->paths = make_mesh_paths(config_.base_data_dir, mesh_id);
+            // Parse config_json for full MeshConfig fields
+            const char* json_cstr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (json_cstr) {
+                std::string config_json(json_cstr);
+                ctx->config.cipher_suite_id = static_cast<CryptoSuiteID>(
+                    json_read_int(config_json, "cipher_suite_id", kSuitePurePQC));
+                ctx->config.listen_address = json_read_string(config_json, "listen_address");
+                if (ctx->config.listen_address.empty())
+                    ctx->config.listen_address = "0.0.0.0:7777";
+                ctx->config.bootstrap_configured =
+                    json_read_string(config_json, "bootstrap_configured") == "true";
+                ctx->config.hmac_secret = json_read_string(config_json, "hmac_secret");
+                ctx->config.authority_pubkey = json_read_string(config_json, "authority_pubkey");
+                ctx->config.root_pubkey = json_read_string(config_json, "root_pubkey");
+                ctx->config.epoch = json_read_int(config_json, "epoch", 1);
+                // Parse advertise_addresses
+                auto adv = config_json.find("\"advertise_addresses\"");
+                if (adv != std::string::npos) {
+                    auto colon = config_json.find(':', adv);
+                    auto arr_start = config_json.find('[', colon);
+                    if (arr_start != std::string::npos) {
+                        auto arr_end = config_json.find(']', arr_start);
+                        if (arr_end != std::string::npos) {
+                            std::string arr = config_json.substr(arr_start + 1, arr_end - arr_start - 1);
+                            size_t p = 0;
+                            while (true) {
+                                auto q1 = arr.find('"', p);
+                                if (q1 == std::string::npos) break;
+                                auto q2 = arr.find('"', q1 + 1);
+                                if (q2 == std::string::npos) break;
+                                ctx->config.advertise_addresses.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+                                p = q2 + 1;
+                            }
+                        }
+                    }
+                }
+                // Parse bootstrap_endpoints
+                auto boot = config_json.find("\"bootstrap_endpoints\"");
+                if (boot != std::string::npos) {
+                    auto colon = config_json.find(':', boot);
+                    auto arr_start = config_json.find('[', colon);
+                    if (arr_start != std::string::npos) {
+                        auto arr_end = config_json.find(']', arr_start);
+                        if (arr_end != std::string::npos) {
+                            std::string arr = config_json.substr(arr_start + 1, arr_end - arr_start - 1);
+                            size_t p = 0;
+                            while (true) {
+                                auto q1 = arr.find('"', p);
+                                if (q1 == std::string::npos) break;
+                                auto q2 = arr.find('"', q1 + 1);
+                                if (q2 == std::string::npos) break;
+                                ctx->config.bootstrap_endpoints.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+                                p = q2 + 1;
+                            }
+                        }
+                    }
+                }
+            }
         }
         sqlite3_finalize(stmt);
         return ctx;
+    }
+
+    Result<std::shared_ptr<MeshContext>> get_mesh_by_name(const std::string& display_name) {
+        auto found = find_mesh(display_name, display_name);
+        if (!found) {
+            return SMO_ERR_STORAGE(404, Info, NoRetry, None, "Mesh not found: " + display_name);
+        }
+        return load_mesh_context(found.value());
     }
 
 private:
@@ -311,6 +435,10 @@ Result<std::shared_ptr<MeshContext>> MeshManager::get_mesh(const std::string& me
     return impl_->get_mesh(mesh_id);
 }
 
+Result<std::shared_ptr<MeshContext>> MeshManager::get_mesh_by_name(const std::string& display_name) {
+    return impl_->get_mesh_by_name(display_name);
+}
+
 Result<std::shared_ptr<MeshContext>> MeshManager::get_current_mesh() const {
     if (impl_->get_current_mesh_id().empty()) {
         return SMO_ERR_STORAGE(404, Info, NoRetry, None, "No current mesh");
@@ -378,6 +506,17 @@ Result<std::string> MeshManager::generate_invite(
 
     auto& config = ctx.value()->config;
 
+    // Use provided endpoints, or fall back to mesh config bootstrap_endpoints
+    std::vector<std::string> endpoints = bootstrap_endpoints;
+    if (endpoints.empty()) {
+        endpoints = config.bootstrap_endpoints;
+    }
+
+    if (endpoints.empty()) {
+        return SMO_ERR_STORAGE(223, Error, NoRetry, None,
+                               "bootstrap not configured: run 'smo-admin mesh publish' first");
+    }
+
     auto crypto_result = cipher_suite(mesh_id);
     if (!crypto_result) return crypto_result.error();
     const auto* crypto = crypto_result.value();
@@ -397,7 +536,7 @@ Result<std::string> MeshManager::generate_invite(
         config.mesh_id,
         config.epoch,
         static_cast<int>(config.cipher_suite_id),
-        bootstrap_endpoints,
+        endpoints,
         role,
         expiry,
         hmac_secret,
@@ -406,6 +545,111 @@ Result<std::string> MeshManager::generate_invite(
     if (!token_result) return token_result.error();
 
     return enroll::encode_token_wire(token_result.value());
+}
+
+// ---------------------------------------------------------------------------
+// Publish mesh: configure bootstrap endpoints after mesh creation
+// ---------------------------------------------------------------------------
+Result<void> MeshManager::publish_mesh(
+    const std::string& mesh_id,
+    const std::string& listen_address,
+    const std::vector<std::string>& advertise_addresses,
+    const std::vector<std::string>& bootstrap_endpoints)
+{
+    auto ctx_result = impl_->get_mesh(mesh_id);
+    if (!ctx_result) return ctx_result.error();
+    auto ctx = ctx_result.value();
+
+    ctx->config.listen_address = listen_address;
+    ctx->config.advertise_addresses = advertise_addresses;
+    ctx->config.bootstrap_endpoints = bootstrap_endpoints;
+    ctx->config.bootstrap_configured = true;
+
+    // Update mesh.json on disk
+    auto paths = make_mesh_paths(impl_->config_.base_data_dir, mesh_id);
+    std::ofstream mf(paths.mesh_json);
+    if (!mf) {
+        return SMO_ERR_STORAGE(905, Error, NoRetry, None,
+                               "Failed to write mesh.json at " + paths.mesh_json);
+    }
+    mf << serialize_config(ctx->config);
+    mf.close();
+
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// Load full MeshConfig from mesh.json (static, used by smo-admin standalone)
+// ---------------------------------------------------------------------------
+Result<MeshConfig> MeshManager::load_mesh_config(const std::string& mesh_dir) {
+    std::string path = mesh_dir + "/mesh.json";
+    std::ifstream f(path);
+    if (!f) {
+        return SMO_ERR_STORAGE(404, Info, NoRetry, None,
+                               "mesh.json not found: " + path);
+    }
+    std::string json((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+    f.close();
+
+    MeshConfig cfg;
+    cfg.mesh_id        = json_read_string(json, "mesh_id");
+    cfg.display_name   = json_read_string(json, "display_name");
+    cfg.authority_pubkey = json_read_string(json, "authority_pubkey");
+    cfg.root_pubkey    = json_read_string(json, "root_pubkey");
+    cfg.hmac_secret    = json_read_string(json, "hmac_secret");
+    cfg.cipher_suite_id = static_cast<CryptoSuiteID>(json_read_int(json, "cipher_suite_id", kSuitePurePQC));
+    cfg.epoch          = json_read_int(json, "epoch", 1);
+    cfg.created_at     = json_read_int(json, "created_at", 0);
+    cfg.listen_address = json_read_string(json, "listen_address");
+    if (cfg.listen_address.empty()) cfg.listen_address = "0.0.0.0:7777";
+    cfg.bootstrap_configured = json_read_string(json, "bootstrap_configured") == "true";
+
+    // Parse advertise_addresses array
+    auto adv_start = json.find("\"advertise_addresses\"");
+    if (adv_start != std::string::npos) {
+        auto colon = json.find(':', adv_start);
+        auto arr_start = json.find('[', colon);
+        if (arr_start != std::string::npos) {
+            auto arr_end = json.find(']', arr_start);
+            if (arr_end != std::string::npos) {
+                std::string arr = json.substr(arr_start + 1, arr_end - arr_start - 1);
+                size_t pos = 0;
+                while (true) {
+                    auto q1 = arr.find('"', pos);
+                    if (q1 == std::string::npos) break;
+                    auto q2 = arr.find('"', q1 + 1);
+                    if (q2 == std::string::npos) break;
+                    cfg.advertise_addresses.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+                    pos = q2 + 1;
+                }
+            }
+        }
+    }
+
+    // Parse bootstrap_endpoints array
+    auto boot_start = json.find("\"bootstrap_endpoints\"");
+    if (boot_start != std::string::npos) {
+        auto colon = json.find(':', boot_start);
+        auto arr_start = json.find('[', colon);
+        if (arr_start != std::string::npos) {
+            auto arr_end = json.find(']', arr_start);
+            if (arr_end != std::string::npos) {
+                std::string arr = json.substr(arr_start + 1, arr_end - arr_start - 1);
+                size_t pos = 0;
+                while (true) {
+                    auto q1 = arr.find('"', pos);
+                    if (q1 == std::string::npos) break;
+                    auto q2 = arr.find('"', q1 + 1);
+                    if (q2 == std::string::npos) break;
+                    cfg.bootstrap_endpoints.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+                    pos = q2 + 1;
+                }
+            }
+        }
+    }
+
+    return cfg;
 }
 
 } // namespace smo

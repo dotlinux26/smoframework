@@ -140,8 +140,9 @@ static bool write_file_binary(const std::string& path, smo::BytesView data) {
 static std::string read_stdin() {
     std::string data;
     char buf[4096];
-    while (fgets(buf, sizeof(buf), stdin)) {
-        data.append(buf);
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), stdin)) > 0) {
+        data.append(buf, n);
     }
     return data;
 }
@@ -554,6 +555,7 @@ int main(int argc, char* argv[]) {
     bool export_copy = false;
     int port = 7777;
     std::string data_dir = "/var/lib/smo";
+    std::string mesh_dir;
     std::string node_name;
     std::string seed_addr;
     std::string export_path;
@@ -565,10 +567,16 @@ int main(int argc, char* argv[]) {
         else if (arg == "--init") init_mode = true;
         else if (arg == "--port" && i + 1 < argc) port = std::atoi(argv[++i]);
         else if (arg == "--data" && i + 1 < argc) data_dir = argv[++i];
+        else if (arg == "--mesh-dir" && i + 1 < argc) mesh_dir = argv[++i];
         else if (arg == "--name" && i + 1 < argc) node_name = argv[++i];
         else if (arg == "--seed" && i + 1 < argc) seed_addr = argv[++i];
         else if (arg == "--export" && i + 1 < argc) { export_mode = true; export_path = argv[++i]; }
-        else if (arg == "--import" && i + 1 < argc) { import_mode = true; import_path = argv[++i]; }
+        else if (arg == "--import") {
+            import_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                import_path = argv[++i];
+            }
+        }
         else if (arg == "--pubkey") pubkey_mode = true;
         else if (arg == "--copy") { pubkey_copy = true; export_copy = true; }
         else if (arg == "--fingerprint") pubkey_fingerprint = true;
@@ -734,6 +742,98 @@ int main(int argc, char* argv[]) {
     auto& lstnr = listen_result.value();
 
     std::printf("[smo-node] Listening on tcp://0.0.0.0:%d\n", port);
+
+    // ── Bootstrap summary ─────────────────────────────────────
+    if (!mesh_dir.empty()) {
+        std::string mesh_json = mesh_dir + "/mesh.json";
+        std::ifstream f(mesh_json);
+        if (f) {
+            std::string json((std::istreambuf_iterator<char>(f)),
+                             std::istreambuf_iterator<char>());
+            std::string listen_addr = "0.0.0.0:7777";
+            std::vector<std::string> advertise;
+            std::vector<std::string> bootstrap;
+            bool bootstrap_configured = false;
+
+            // Parse listen_address
+            auto pos = json.find("\"listen_address\"");
+            if (pos != std::string::npos) {
+                auto colon = json.find(':', pos);
+                auto start = json.find('"', colon + 1);
+                if (start != std::string::npos) {
+                    auto end = json.find('"', start + 1);
+                    if (end != std::string::npos) {
+                        listen_addr = json.substr(start + 1, end - start - 1);
+                    }
+                }
+            }
+
+            // Parse bootstrap_configured
+            pos = json.find("\"bootstrap_configured\"");
+            if (pos != std::string::npos) {
+                auto colon = json.find(':', pos);
+                auto start = json.find_first_of("tf", colon);
+                if (start != std::string::npos) {
+                    bootstrap_configured = json[start] == 't';
+                }
+            }
+
+            // Parse advertise_addresses
+            pos = json.find("\"advertise_addresses\"");
+            if (pos != std::string::npos) {
+                auto colon = json.find(':', pos);
+                auto arr_start = json.find('[', colon);
+                if (arr_start != std::string::npos) {
+                    auto arr_end = json.find(']', arr_start);
+                    if (arr_end != std::string::npos) {
+                        std::string arr = json.substr(arr_start + 1, arr_end - arr_start - 1);
+                        size_t p = 0;
+                        while (true) {
+                            auto q1 = arr.find('"', p);
+                            if (q1 == std::string::npos) break;
+                            auto q2 = arr.find('"', q1 + 1);
+                            if (q2 == std::string::npos) break;
+                            advertise.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+                            p = q2 + 1;
+                        }
+                    }
+                }
+            }
+
+            // Parse bootstrap_endpoints
+            pos = json.find("\"bootstrap_endpoints\"");
+            if (pos != std::string::npos) {
+                auto colon = json.find(':', pos);
+                auto arr_start = json.find('[', colon);
+                if (arr_start != std::string::npos) {
+                    auto arr_end = json.find(']', arr_start);
+                    if (arr_end != std::string::npos) {
+                        std::string arr = json.substr(arr_start + 1, arr_end - arr_start - 1);
+                        size_t p = 0;
+                        while (true) {
+                            auto q1 = arr.find('"', p);
+                            if (q1 == std::string::npos) break;
+                            auto q2 = arr.find('"', q1 + 1);
+                            if (q2 == std::string::npos) break;
+                            bootstrap.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+                            p = q2 + 1;
+                        }
+                    }
+                }
+            }
+
+            std::printf("Mesh: %s\n", mesh_dir.c_str());
+            std::printf("Status: %s\n", bootstrap_configured ? "ONLINE" : "OFFLINE");
+            std::printf("Listen:     %s\n", listen_addr.c_str());
+            for (const auto& addr : advertise) {
+                std::printf("Advertise:  %s\n", addr.c_str());
+            }
+            if (bootstrap_configured) {
+                std::printf("Bootstrap:  YES\n");
+            }
+            std::printf("Peers:      %zu\n", membership.count());
+        }
+    }
 
     // ── Bootstrap: connect to seed ────────────────────────────
     if (!seed_addr.empty()) {
