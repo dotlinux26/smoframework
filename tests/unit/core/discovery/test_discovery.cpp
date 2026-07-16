@@ -1,8 +1,22 @@
 #include <discovery/discovery.hpp>
+#include <transport/transport.hpp>
 #include <cstdio>
 #include <cstring>
 
 using namespace smo;
+
+// ==========================================================================
+// Dummy Transport for testing
+// ==========================================================================
+class DummyTransport : public Transport {
+public:
+    Result<ListenerPtr> listen(const Endpoint&) override {
+        return SMO_ERR_TRANSPORT(306, Error, NoRetry, RestartFSM, "dummy");
+    }
+    Result<SessionPtr> connect(const Endpoint&) override {
+        return SMO_ERR_TRANSPORT(300, Error, RetryBackoff, Reconnect, "dummy");
+    }
+};
 
 // ---------------------------------------------------------------------------
 static int failures = 0;
@@ -67,8 +81,20 @@ static NodeID make_node_id(uint8_t first_byte) {
 }
 
 // ==========================================================================
-// Tests — PeerState
+// Dummy Transport for testing
 // ==========================================================================
+class DummyTransport : public Transport {
+public:
+    std::string_view name() const override { return "dummy"; }
+
+    Result<ListenerPtr> listen(const Endpoint&) override {
+        return SMO_ERR_TRANSPORT(306, Error, NoRetry, RestartFSM, "dummy");
+    }
+    Result<SessionPtr> connect(const Endpoint&) override {
+        return SMO_ERR_TRANSPORT(300, Error, RetryBackoff, Reconnect, "dummy");
+    }
+};
+
 static bool test_peer_state_to_string() {
     ASSERT(std::strcmp(to_string(PeerState::Unknown), "Unknown") == 0);
     ASSERT(std::strcmp(to_string(PeerState::Online), "Online") == 0);
@@ -416,7 +442,8 @@ static bool test_offline_msg_roundtrip() {
 static bool test_discovery_engine_handle_hello() {
     MembershipTable table;
     HealthMonitor monitor;
-    DiscoveryEngine engine(table, monitor);
+    DummyTransport transport;
+    DiscoveryEngine engine(table, monitor, transport);
 
     NodeID peer_id = make_node_id(0x50);
     HelloMsg hello;
@@ -443,7 +470,8 @@ static bool test_discovery_engine_handle_hello() {
 static bool test_discovery_engine_handle_welcome() {
     MembershipTable table;
     HealthMonitor monitor;
-    DiscoveryEngine engine(table, monitor);
+    DummyTransport transport;
+    DiscoveryEngine engine(table, monitor, transport);
 
     WelcomeMsg welcome;
     welcome.node_id = make_node_id(0x60);
@@ -464,7 +492,8 @@ static bool test_discovery_engine_handle_welcome() {
 static bool test_discovery_engine_handle_offline() {
     MembershipTable table;
     HealthMonitor monitor;
-    DiscoveryEngine engine(table, monitor);
+    DummyTransport transport;
+    DiscoveryEngine engine(table, monitor, transport);
 
     NodeID peer_id = make_node_id(0x70);
     PeerRecord rec;
@@ -489,7 +518,8 @@ static bool test_discovery_engine_handle_offline() {
 static bool test_discovery_engine_handle_node_info() {
     MembershipTable table;
     HealthMonitor monitor;
-    DiscoveryEngine engine(table, monitor);
+    DummyTransport transport;
+    DiscoveryEngine engine(table, monitor, transport);
 
     NodeInfoMsg info;
     info.peer_record.node_id = make_node_id(0x80);
@@ -508,7 +538,8 @@ static bool test_discovery_engine_handle_node_info() {
 static bool test_discovery_engine_tick() {
     MembershipTable table;
     HealthMonitor monitor;
-    DiscoveryEngine engine(table, monitor);
+    DummyTransport transport;
+    DiscoveryEngine engine(table, monitor, transport);
 
     NodeID peer_id = make_node_id(0x90);
     PeerRecord rec;
