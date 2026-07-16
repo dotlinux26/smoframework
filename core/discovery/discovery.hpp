@@ -203,14 +203,14 @@ public:
 // ===========================================================================
 class DiscoveryEngine {
 public:
-    DiscoveryEngine(MembershipTable& table, HealthMonitor& monitor);
+    DiscoveryEngine(MembershipTable& table, HealthMonitor& monitor, Transport& transport);
 
     // Handle incoming discovery messages
     Result<void> handle_hello(const HelloMsg& msg, const Endpoint& from, int64_t now);
     Result<void> handle_welcome(const WelcomeMsg& msg, int64_t now);
     Result<void> handle_ping(const PingMsg& msg, int64_t now);
     Result<void> handle_pong(const PongMsg& msg, int64_t now);
-    Result<void> handle_discover(const DiscoverMsg& msg, int64_t now);
+    Result<void> handle_discover(const DiscoverMsg& msg, const Endpoint& from, int64_t now);
     Result<void> handle_node_info(const NodeInfoMsg& msg, int64_t now);
     Result<void> handle_offline(const OfflineMsg& msg, int64_t now);
 
@@ -223,6 +223,9 @@ public:
 private:
     MembershipTable& table_;
     HealthMonitor& monitor_;
+    Transport& transport_;
+
+    void send_node_info(const Endpoint& to) const;
 };
 
 } // namespace smo

@@ -14,7 +14,12 @@
 #include <core/identity/identity.hpp>
 #include <core/transport/transport.hpp>
 #include <core/transport/tcp_transport.hpp>
+#include <core/transport/udp_transport.hpp>
 #include <core/select/selector.hpp>
+#include <core/network/udp/heartbeat_service.hpp>
+#include <core/discovery/gossip.hpp>
+#include <core/network/sync/membership_sync.hpp>
+#include <core/network/transport/address_resolver.hpp>
 
 #include <chrono>
 #include <csignal>
@@ -37,6 +42,7 @@ static void print_usage(const char* prog) {
 
 Usage:
   %s --daemon --port <port> --data <data-dir> [--name <name>]
+                 [--seed <host:port>]
 
 Options:
   --daemon          Run as daemon
@@ -49,39 +55,7 @@ Options:
         prog);
 }
 
-int main(int argc, char* argv[]) {
-    std::signal(SIGINT, handle_signal);
-    std::signal(SIGTERM, handle_signal);
-
-    // Parse args
-    bool daemon_mode = false;
-    int port = 7777;
-    std::string data_dir = "/var/lib/smo";
-    std::string node_name;
-    std::string seed_addr;
-
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--daemon") daemon_mode = true;
-        else if (arg == "--port" && i + 1 < argc) port = std::atoi(argv[++i]);
-        else if (arg == "--data" && i + 1 < argc) data_dir = argv[++i];
-        else if (arg == "--name" && i + 1 < argc) node_name = argv[++i];
-        else if (arg == "--seed" && i + 1 < argc) seed_addr = argv[++i];
-        else if (arg == "--help") { print_usage(argv[0]); return 0; }
-    }
-
-    if (!daemon_mode) {
-        // Without --daemon, just init and print info
-        std::printf("SMO Node\n");
-        std::printf("  Data dir: %s\n", data_dir.c_str());
-        std::printf("  Port:     %d\n", port);
-        if (!node_name.empty()) std::printf("  Name:     %s\n", node_name.c_str());
-        if (!seed_addr.empty()) std::printf("  Seed:     %s\n", seed_addr.c_str());
-        std::printf("  Mode:     standalone (use --daemon to run as service)\n");
-        return 0;
-    }
-
-    // ===========================================================================
+// ===========================================================================
 // Helpers
 // ===========================================================================
 
@@ -170,12 +144,61 @@ int main(int argc, char* argv[]) {
     smo::MembershipTable membership;
     smo::HealthMonitor health_monitor;
     smo::DiscoveryEngine discovery_engine(membership, health_monitor);
+    smo::GossipEngine gossip_engine(membership);
+    smo::network::sync::MembershipSync membership_sync(membership, health_monitor);
 
-    // Register TCP transport
+    // Register transports
     smo::TransportRegistry::instance().register_transport(
         std::make_unique<smo::TcpTransport>(), "tcp");
+    smo::TransportRegistry::instance().register_transport(
+        std::make_unique<smo::network::udp::UdpTransport>(), "udp");
 
-    // Create listening endpoint
+    // Initialize PeerStore and sync with MembershipTable
+    smo::PeerStore peer_store;
+    if (auto r = peer_store.open(data_dir); !r) {
+        std::fprintf(stderr, "[smo-node] Failed to open PeerStore: %s\n",
+                     r.error().message.c_str());
+    } else {
+        peer_store.sync_to_membership(membership);
+    }
+
+    // Initialize AddressResolver
+    smo::network::transport::AddressResolver address_resolver;
+
+    // Register UDP transport and start UDP listener
+    smo::Endpoint udp_listen_ep;
+    udp_listen_ep.scheme = "udp";
+    udp_listen_ep.host = "0.0.0.0";
+    udp_listen_ep.port = static_cast<uint16_t>(port);
+
+    auto udp_transport = std::make_unique<smo::network::udp::UdpTransport>();
+    auto udp_listen_result = udp_transport->listen(udp_listen_ep);
+    if (!udp_listen_result) {
+        std::fprintf(stderr, "[smo-node] Failed to listen UDP: %s\n",
+                     udp_listen_result.error().message.c_str());
+    } else {
+        std::printf("[smo-node] Listening on udp://0.0.0.0:%d\n", port);
+    }
+
+    // Initialize HeartbeatService
+    smo::network::udp::HeartbeatService::Config hb_config;
+    hb_config.ping_interval_ms = 5000;
+    hb_config.ping_timeout_ms = 3000;
+    hb_config.max_misses = 3;
+    hb_config.local_port = port; // same port for UDP
+
+    smo::network::udp::HeartbeatService heartbeat_service(hb_config);
+    auto hb_start = heartbeat_service.start(*static_cast<smo::network::udp::UdpTransport*>(udp_transport.get()),
+                                            membership, health_monitor);
+    if (!hb_start) {
+        std::fprintf(stderr, "[smo-node] Failed to start heartbeat: %s\n",
+                     hb_start.error().message.c_str());
+    } else {
+        std::printf("[smo-node] Heartbeat service started (interval=%ums, timeout=%ums, max_misses=%u)\n",
+                    hb_config.ping_interval_ms, hb_config.ping_timeout_ms, hb_config.max_misses);
+    }
+
+    // Create TCP listening endpoint
     smo::Endpoint listen_ep;
     listen_ep.scheme = "tcp";
     listen_ep.host = "0.0.0.0";
@@ -183,7 +206,7 @@ int main(int argc, char* argv[]) {
 
     auto listen_result = smo::TransportRegistry::instance().get("tcp")->listen(listen_ep);
     if (!listen_result) {
-        std::fprintf(stderr, "[smo-node] Failed to listen: %s\n",
+        std::fprintf(stderr, "[smo-node] Failed to listen TCP: %s\n",
                      listen_result.error().message.c_str());
         return 1;
     }
@@ -201,10 +224,6 @@ int main(int argc, char* argv[]) {
             std::fprintf(stderr, "[smo-node] Invalid seed address: %s\n", seed_addr.c_str());
         } else {
             seed_ep = ep_result.value();
-
-            // Register transport if not already
-            smo::TransportRegistry::instance().register_transport(
-                std::make_unique<smo::TcpTransport>(), "tcp");
 
             auto now = std::chrono::system_clock::to_time_t(
                 std::chrono::system_clock::now());
@@ -234,10 +253,9 @@ int main(int argc, char* argv[]) {
                     session.value()->send(disc_data);
                     auto recv = session.value()->recv(8192);
                     if (recv) {
-                        // Parse peer table response (NodeInfoMsg list)
-                        // For now just log
                         std::printf("[smo-node] Received peer table (%zu bytes)\n",
                                     recv.value().size());
+                        // TODO: Parse NodeInfoMsg list and populate membership
                     }
                 }
 
@@ -251,50 +269,80 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Subscribe to membership events for gossip
+    membership_sync.subscribe([&](const smo::network::sync::MembershipEvent& ev) {
+        // Forward to GossipEngine for propagation
+        // For now just log
+        std::printf("[smo-node] Membership event: type=%d node=%s\n",
+                    static_cast<int>(ev.type), ev.node_id.to_string().c_str());
+    });
+
     // ── Main loop ──────────────────────────────────────────────
     std::printf("[smo-node] Entering main loop...\n");
 
     int64_t last_tick = 0;
+    int64_t last_gossip = 0;
+    int64_t last_peerstore_sync = 0;
+
     while (g_running) {
         int64_t now_ns = static_cast<int64_t>(
             std::chrono::system_clock::now().time_since_epoch().count());
 
-        // Periodic discovery engine tick (every 5s)
-        if (now_ns - last_tick > 5000000000LL) {
+        // Periodic ticks
+        if (now_ns - last_tick > 5000000000LL) { // 5s
             discovery_engine.tick(now_ns);
+            heartbeat_service.tick(now_ns);
             last_tick = now_ns;
         }
 
-        // Accept connections with timeout
-        auto session = lstnr->accept();
-        if (!session) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue;
+        if (now_ns - last_gossip > 5000000000LL) { // 5s
+            gossip_engine.tick(now_ns);
+            // Propagate membership changes via gossip
+            auto events = membership_sync.pending_events(gossip_engine.current_sequence());
+            if (!events.empty()) {
+                // TODO: Send gossip messages to fanout peers
+            }
+            last_gossip = now_ns;
         }
 
-        std::printf("[smo-node] Accepted connection from %s\n",
-                    session.value()->remote_endpoint().to_string().c_str());
-
-        // Read message
-        auto data = session.value()->recv(4096);
-        if (!data) {
-            session.value()->close();
-            continue;
+        // Periodic PeerStore sync
+        if (now_ns - last_peerstore_sync > 30000000000LL) { // 30s
+            peer_store.sync_from_membership(membership);
+            last_peerstore_sync = now_ns;
         }
 
-        // Try to parse as discovery message
-        // In real impl: parse header, dispatch to DiscoveryEngine
-        // For now: log and respond with basic Hello if it's a HELLO
-        std::printf("[smo-node] Received %zu bytes from %s\n",
-                    data.value().size(),
-                    session.value()->remote_endpoint().to_string().c_str());
+        // Accept TCP connections
+        auto tcp_session = lstnr->accept();
+        if (tcp_session) {
+            std::printf("[smo-node] Accepted TCP connection from %s\n",
+                        tcp_session.value()->remote_endpoint().to_string().c_str());
 
-        // Echo back for testing
-        session.value()->send(data.value());
-        session.value()->close();
+            auto data = tcp_session.value()->recv(4096);
+            if (data) {
+                // Parse discovery message and dispatch
+                // For now: echo back
+                std::printf("[smo-node] Received %zu bytes from %s\n",
+                            data.value().size(),
+                            tcp_session.value()->remote_endpoint().to_string().c_str());
+                tcp_session.value()->send(data.value());
+            }
+            tcp_session.value()->close();
+        }
+
+        // Accept UDP packets
+        // Note: UDP listener is in heartbeat_service's listener_
+        // For now, we poll the UDP socket manually
+        // TODO: Integrate UDP listener into main loop properly
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
+    // Cleanup
+    heartbeat_service.stop();
     lstnr->close();
+    peer_store.sync_from_membership(membership);
+    peer_store.close();
+
     std::printf("[smo-node] Shutdown complete.\n");
     return 0;
 }

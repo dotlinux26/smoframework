@@ -58,6 +58,7 @@ void DatabaseHandle::close() {
     }
 }
 
+
 Result<void> DatabaseHandle::exec(const char* sql) {
     if (!db_) {
         return SMO_ERR_STORAGE(905, Error, RetrySafe, RebootNode,
@@ -73,7 +74,7 @@ Result<void> DatabaseHandle::exec(const char* sql) {
     return {};
 }
 
-Result<Statement> DatabaseHandle::prepare(const char* sql) {
+Result<Statement> DatabaseHandle::prepare(const char* sql) const {
     if (!db_) {
         return SMO_ERR_STORAGE(905, Error, RetrySafe, RebootNode,
                                "database not open");

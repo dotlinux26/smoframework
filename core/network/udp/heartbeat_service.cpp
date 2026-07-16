@@ -6,6 +6,16 @@
 
 namespace smo::network::udp {
 
+HeartbeatService::Config HeartbeatService::default_config() {
+    return Config{};
+}
+
+HeartbeatService::HeartbeatService(const Config& cfg)
+    : config_(cfg) {}
+
+HeartbeatService::HeartbeatService()
+    : config_(default_config()) {}
+
 Result<void> HeartbeatService::start(UdpTransport& udp_transport,
                                      smo::MembershipTable& membership,
                                      smo::HealthMonitor& health) {

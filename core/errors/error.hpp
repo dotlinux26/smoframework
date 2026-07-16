@@ -223,6 +223,9 @@ public:
     bool has_error() const noexcept { return has_error_; }
     Error& error() & { return error_; }
     Error&& error() && { return std::move(error_); }
+
+    // Discard result — useful when caller doesn't care about error but wants to compile
+    void ignore() const noexcept {}
 };
 
 // ---------------------------------------------------------------------------

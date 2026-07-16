@@ -614,11 +614,10 @@ Result<PeerRecord> Bootstrap::find_seed(
 // ===========================================================================
 // DiscoveryEngine
 // ===========================================================================
-DiscoveryEngine::DiscoveryEngine(MembershipTable& table, HealthMonitor& monitor)
-    : table_(table), monitor_(monitor) {}
+DiscoveryEngine::DiscoveryEngine(MembershipTable& table, HealthMonitor& monitor, Transport& transport)
+    : table_(table), monitor_(monitor), transport_(transport) {}
 
 Result<void> DiscoveryEngine::handle_hello(const HelloMsg& msg, const Endpoint& from, int64_t now) {
-    // Ensure protocol version is compatible
     if (msg.protocol_version != 1) {
         return {};  // silently ignore incompatible versions
     }
@@ -653,9 +652,11 @@ Result<void> DiscoveryEngine::handle_pong(const PongMsg& msg, int64_t now) {
     return {};
 }
 
-Result<void> DiscoveryEngine::handle_discover(const DiscoverMsg& msg, int64_t now) {
+Result<void> DiscoveryEngine::handle_discover(const DiscoverMsg& msg, const Endpoint& from, int64_t now) {
     (void)msg;
     (void)now;
+    // Respond with full peer table (NODE_INFO for each peer)
+    send_node_info(from);
     return {};
 }
 
@@ -680,6 +681,20 @@ Result<void> DiscoveryEngine::handle_offline(const OfflineMsg& msg, int64_t now)
 
 void DiscoveryEngine::tick(int64_t now) {
     monitor_.tick(table_, now);
+}
+
+void DiscoveryEngine::send_node_info(const Endpoint& to) const {
+    auto peers = table_.peers();
+    for (auto& rec : peers) {
+        if (rec.state == PeerState::Offline) continue;
+        NodeInfoMsg msg;
+        msg.peer_record = rec;
+        auto data = msg.serialize();
+        auto session = transport_.connect(to);
+        if (session) {
+            session.value()->send(data).ignore();
+        }
+    }
 }
 
 } // namespace smo

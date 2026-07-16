@@ -22,8 +22,11 @@ public:
         int      max_misses       = 3;
         uint16_t local_port       = 0; // 0 = auto
     };
+explicit HeartbeatService(const Config& cfg);
 
-    HeartbeatService(Config cfg = {}) : config_(cfg) {}
+    HeartbeatService();
+
+    static Config default_config();
 
     ~HeartbeatService() { stop(); }
 
@@ -52,7 +55,7 @@ private:
     smo::MembershipTable* membership_ = nullptr;
     smo::HealthMonitor* health_ = nullptr;
 
-    std::unique_ptr<UdpListener> listener_;
+    std::unique_ptr<TransportListener> listener_;
 
     std::atomic<bool> running_{false};
     int64_t last_ping_ns_ = 0;

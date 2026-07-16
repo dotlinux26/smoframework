@@ -45,9 +45,12 @@ public:
     Result<void> exec(const std::string& sql) { return exec(sql.c_str()); }
 
     // Prepare a statement. Returns a RAII Statement wrapper.
-    Result<Statement> prepare(const char* sql);
+    Result<Statement> prepare(const char* sql) const;
 
-    sqlite3* handle() { return db_; }
+    // Rollback current transaction
+    void rollback() { exec("ROLLBACK;"); }
+
+    sqlite3* handle() const { return db_; }
     bool is_open() const { return db_ != nullptr; }
     const std::string& path() const { return path_; }
 
