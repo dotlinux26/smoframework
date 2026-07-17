@@ -20,7 +20,7 @@ Current enrollment requires **7 manual steps**:
 1. smo-node --init --name node1 --data /tmp/node1
 2. smo-node --export /tmp/node1.csr.smor --data /tmp/node1
 3. scp /tmp/node1.csr.smor cloud:/tmp/
-4. smo-admin --mesh-dir /mesh sign /tmp/node1.csr.smor -o /tmp/node1.cert.smoc
+4. smo-admin --mesh production sign /tmp/node1.csr.smor -o /tmp/node1.cert.smoc
 7. scp cloud:/tmp/node1.cert.smoc /tmp/
 8. smo-node --import /tmp/node1.cert.smoc --data /tmp/node1
 9. smo-node --daemon --data /tmp/node1 --seed 140.245.39.19:5454
@@ -98,14 +98,15 @@ mesh join TOKEN
 ### `smo mesh join <token>` (smo-cli)
 
 ```bash
-smo mesh join SMO-JOIN-<base64url> [--data <dir>] [--name <name>] [--port <port>] [--mesh-dir <dir>]
+smo mesh join --token SMO-JOIN-<base64url> [--data <dir>] [--name <name>] [--port <port>]
 ```
 
 **Flags:**
 - `--data <dir>` — Data directory (default: `~/.smo/node`)
 - `--name <name>` — Display name (default: hostname)
 - `--port <port>` — Listen port (default: from token's listen_address)
-- `--mesh-dir <dir>` — Mesh config directory (default: `~/.smo/meshes/<mesh_id>`)
+
+Mesh context is used automatically. No `--mesh` or `--mesh-dir` needed.
 
 **Behavior:**
 1. Decodes token, validates HMAC & expiry
@@ -118,10 +119,12 @@ smo mesh join SMO-JOIN-<base64url> [--data <dir>] [--name <name>] [--port <port>
 ### `smo-node --join <token>` (smo-node)
 
 ```bash
-smo-node --join SMO-JOIN-... [--data <dir>] [--name <name>] [--port <port>] [--mesh-dir <dir>]
+smo-node --join SMO-JOIN-... [--data <dir>] [--name <name>] [--port <port>]
 ```
 
 **Behavior:** Same as `smo mesh join` but in smo-node binary. Non-interactive, exits after daemon starts (or fails).
+
+**Data directory:** `~/.smo/node/` by default (overridable via `--data`).
 
 ---
 

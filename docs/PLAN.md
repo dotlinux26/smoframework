@@ -413,7 +413,7 @@ Two new concepts: **Listen Address** (what the daemon binds to) and **Advertise 
 ### Wizard Flow (`smo-admin mesh publish`)
 
 ```
-$ smo-admin --mesh-dir ./production mesh publish
+$ smo-admin --mesh production mesh publish
 
 Mesh: production
 
@@ -489,7 +489,7 @@ Step 6: Confirm
 After publish, `generate-invite` reads `bootstrap_endpoints` directly from `mesh.json`:
 
 ```
-$ smo-admin --mesh-dir ./production generate-invite Worker --expire 30m
+$ smo-admin --mesh production generate-invite Worker --expire 30m
 ```
 
 Token CBOR contains:

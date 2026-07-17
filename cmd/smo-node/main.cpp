@@ -26,6 +26,7 @@
 #include <core/discovery/peer_store.hpp>
 #include <core/certificate/certificate.hpp>
 #include <core/enroll/auto_enroll.hpp>
+#include <core/mesh/mesh_resolver.hpp>
 
 #include <providers/suite1_classical/suite1_classical_provider.hpp>
 #include <providers/suite3_purepqc/suite3_purepqc_provider.hpp>
@@ -89,7 +90,7 @@ Usage:
 Options:
   --init            Generate identity and save to data directory
   --name <name>     Display name for the node
-  --data <dir>      Data directory (default: /var/lib/smo)
+  --data <dir>      Data directory (default: ~/.smo/node)
   --export <file>   Export CSR to file
   --export --copy   Copy CSR to clipboard
   --import [<file>] Import certificate (auto-detect: stdin->clipboard->file)
@@ -559,7 +560,7 @@ int main(int argc, char* argv[]) {
     bool join_mode = false;
     std::string join_token;
     int port = 7777;
-    std::string data_dir = "/var/lib/smo";
+    std::string data_dir = smo::mesh::smo_home() + "/node";
     std::string mesh_dir;
     std::string node_name;
     std::string seed_addr;

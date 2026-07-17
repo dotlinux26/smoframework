@@ -235,7 +235,7 @@ struct MeshConfig {
 };
 
 struct MeshPaths {
-    std::string mesh_dir;          // ~/.smo/meshes/<mesh_id>/
+    std::string mesh_dir;          // ~/.smo/meshes/<display_name>/ (name-based, not hash)
     std::string mesh_json;
     std::string cert_path;
     std::string identity_json;

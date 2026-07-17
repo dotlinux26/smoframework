@@ -1333,16 +1333,24 @@ std::string clipboard_info();     // human-readable diagnostic string
 **Decision:** Mesh creation and mesh publishing are separate steps:
 
 ```
-smo-admin --mesh-dir production create-mesh production
-  → Keys + mesh.json (offline)
+smo-admin --mesh production create-mesh
+  → Keys + mesh.json (offline) at ~/.smo/meshes/production/
 
-smo-admin --mesh-dir production mesh publish
+smo-admin --mesh production mesh publish
   → Interactive wizard
   → Detects interfaces, public IP, DNS
   → Verifies port availability
   → Saves bootstrap_endpoints to mesh.json
   → Mesh is now ONLINE
 ```
+
+**Resolution order for `--mesh` vs `--mesh-dir`:**
+1. `--mesh-dir <path>` — Explicit directory path (escape hatch for enterprise/CI)
+2. `--mesh <name>` — Resolves to `~/.smo/meshes/<name>/`
+3. (none) — Reads current mesh from `~/.smo/context.json`
+4. Error with list of available meshes if none found
+
+**`SMO_HOME` environment variable** overrides the default `~/.smo` base path, analogous to `GIT_DIR`.
 
 **Publish wizard steps:**
 

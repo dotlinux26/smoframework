@@ -2,6 +2,7 @@
 #include "intent_parser.hpp"
 #include "core/enroll/join_token.hpp"
 #include "core/enroll/auto_enroll.hpp"
+#include "core/mesh/mesh_resolver.hpp"
 
 #include <providers/suite1_classical/suite1_classical_provider.hpp>
 #include <providers/suite3_purepqc/suite3_purepqc_provider.hpp>
@@ -472,36 +473,119 @@ private:
     }
 
     Result<int> handle_mesh(const Intent& intent) {
+        std::string home = smo::mesh::smo_home();
+
+        // ── require_current: helper to get current mesh or error out ──
+        auto require_current = [&]() -> Result<std::string> {
+            auto cur = context_.get_current_mesh();
+            if (cur && !cur.value().empty()) return cur.value();
+            // List available meshes interactively
+            std::string meshes_dir = home + "/meshes";
+            std::vector<std::string> available;
+            if (std::filesystem::is_directory(meshes_dir)) {
+                for (const auto& entry : std::filesystem::directory_iterator(meshes_dir)) {
+                    if (entry.is_directory()) available.push_back(entry.path().filename().string());
+                }
+            }
+            if (available.empty()) {
+                return SMO_ERR_STORAGE(404, Info, NoRetry, None,
+                    "No meshes found. Create one:\n  smo mesh create <name>\n"
+                    "  smo-admin --mesh <name> create-mesh");
+            }
+            std::string msg = "No active mesh.\n\nAvailable meshes:\n";
+            for (size_t i = 0; i < available.size(); ++i) {
+                msg += "  " + std::to_string(i + 1) + ". " + available[i] + "\n";
+            }
+            msg += "\nUse: smo mesh use <name>";
+            return SMO_ERR_STORAGE(404, Info, NoRetry, None, msg);
+        };
+
         if (intent.flags.count("list") || intent.flags.empty()) {
-            auto mesh_res = context_.get_current_mesh();
-            std::string current = mesh_res ? mesh_res.value() : "(none)";
-            std::cout << "Current mesh: " << current << "\n";
-            if (!current.empty()) {
-                std::cout << "  (single mesh mode)\n";
+            auto current_mesh = context_.get_current_mesh();
+            std::string current_name = current_mesh ? current_mesh.value() : "";
+
+            std::string meshes_dir = home + "/meshes";
+            std::cout << "Meshes:\n";
+            if (std::filesystem::is_directory(meshes_dir)) {
+                for (const auto& entry : std::filesystem::directory_iterator(meshes_dir)) {
+                    if (!entry.is_directory()) continue;
+                    std::string name = entry.path().filename().string();
+                    bool is_current = (name == current_name);
+                    std::cout << (is_current ? "  * " : "    ") << name << "\n";
+                }
             } else {
-                std::cout << "  No mesh selected.\n";
+                std::cout << "  (none)\n";
+            }
+            if (!current_name.empty()) {
+                std::cout << "\nCurrent: " << current_name << "\n";
             }
             return 0;
         }
         if (intent.flags.count("use")) {
             std::string name = intent.flags.at("use");
+            std::string mesh_dir = home + "/meshes/" + name;
+            if (!std::filesystem::is_directory(mesh_dir)) {
+                std::cerr << "Error: mesh '" << name << "' not found\n";
+                std::cerr << "  Create it: smo-admin --mesh " << name << " create-mesh\n";
+                return 1;
+            }
             context_.set_mesh(name);
             std::cout << "Switched to mesh: " << name << "\n";
             return 0;
         }
         if (intent.flags.count("create")) {
             std::string name = intent.flags.at("create");
-            context_.set_mesh(name);
-            std::cout << "Created and switched to mesh: " << name << "\n";
+            std::string mesh_dir = home + "/meshes/" + name;
+            if (std::filesystem::create_directories(mesh_dir)) {
+                context_.set_mesh(name);
+                std::cout << "Created and switched to mesh: " << name << "\n";
+                std::cout << "  Initialize with: smo-admin --mesh " << name << " create-mesh\n";
+            } else {
+                context_.set_mesh(name);
+                std::cout << "Using existing mesh: " << name << "\n";
+            }
+            return 0;
+        }
+        if (intent.flags.count("publish")) {
+            auto current = require_current();
+            if (!current) { std::cerr << current.error().message << "\n"; return 1; }
+            std::string name = current.value();
+            std::cout << "Publishing mesh '" << name << "'...\n";
+            std::string cmd = "smo-admin --mesh " + name + " mesh publish";
+            int rc = std::system(cmd.c_str());
+            if (rc != 0) {
+                std::cerr << "Publish failed (run manually: " << cmd << ")\n";
+                return 1;
+            }
+            return 0;
+        }
+        if (intent.flags.count("serve")) {
+            auto current = require_current();
+            if (!current) { std::cerr << current.error().message << "\n"; return 1; }
+            std::string name = current.value();
+            uint16_t port = static_cast<uint16_t>(context_.get_port().value_or(5454));
+            std::cout << "Starting enroll server for mesh '" << name << "' on port " << port << "...\n";
+            std::string cmd = "smo-admin --mesh " + name + " serve --port " + std::to_string(port);
+            int rc = std::system(cmd.c_str());
+            if (rc != 0) {
+                std::cerr << "Serve failed (run manually: " << cmd << ")\n";
+                return 1;
+            }
             return 0;
         }
         if (intent.flags.count("invite")) {
             std::string role  = intent.flags.count("role") ? intent.flags.at("role") : "Worker";
             std::string expire = intent.flags.count("expire") ? intent.flags.at("expire") : "1h";
-            std::cout << "To generate a Join Token, run on the Authority machine:\n";
-            std::cout << "  smo-admin --mesh-dir <mesh-dir> generate-invite " << role
-                      << " --expire " << expire << "\n";
-            std::cout << "\nThen share the SMO-JOIN-... token with the node operator.\n";
+            auto current = require_current();
+            if (!current) { std::cerr << current.error().message << "\n"; return 1; }
+            std::string name = current.value();
+            std::cout << "Generating invite for mesh '" << name << "'...\n";
+            std::string cmd = "smo-admin --mesh " + name + " generate-invite " + role + " --expire " + expire;
+            int rc = std::system(cmd.c_str());
+            if (rc != 0) {
+                std::cerr << "Invite generation failed (run manually: " << cmd << ")\n";
+                return 1;
+            }
             return 0;
         }
         if (intent.flags.count("join")) {
@@ -509,13 +593,12 @@ private:
             if (token.empty()) {
                 std::cout << "Usage: mesh join --token SMO-JOIN-...\n";
                 std::cout << "\nThe Join Token must be generated first via:\n";
-                std::cout << "  smo-admin --mesh-dir <dir> generate-invite <role>\n";
+                std::cout << "  smo mesh invite\n";
             } else {
-                // Auto-enrollment via Join Token
                 std::cout << "Joining mesh with token...\n";
 
                 std::string data_dir = context_.get_data_dir().empty()
-                    ? "/tmp/smo-join-" + std::to_string(getpid())
+                    ? home + "/node"
                     : context_.get_data_dir();
                 std::string node_name = context_.get_node_name().empty()
                     ? "node-" + std::to_string(getpid())
@@ -533,6 +616,11 @@ private:
         if (intent.flags.count("leave")) {
             context_.set_mesh("");
             std::cout << "Left current mesh.\n";
+            return 0;
+        }
+        if (intent.flags.count("current")) {
+            auto mesh = context_.get_current_mesh();
+            std::cout << (mesh ? mesh.value() : "(none)") << "\n";
             return 0;
         }
         return 0;

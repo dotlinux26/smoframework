@@ -77,13 +77,22 @@ smo mesh use production
 
 # Current mesh
 smo mesh current
-# → production (a1b2c3d4)
+# → production
 
-# Create mesh
-smo mesh create --name staging --display-name "Staging Environment"
+# Create a new mesh (creates directory, sets as current)
+smo mesh create staging
 
-# Join mesh
-smo mesh join --mesh staging --seed seed.example.com:7777
+# Publish mesh (via smo-admin under the hood)
+smo mesh publish
+
+# Generate invite (calls smo-admin generate-invite)
+smo mesh invite --role Worker --expire 1h
+
+# Start enroll server
+smo mesh serve --port 5454
+
+# Join a mesh using a token
+smo mesh join --token SMO-JOIN-<base64url>
 ```
 
 ### 2. Selection Context

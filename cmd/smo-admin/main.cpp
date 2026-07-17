@@ -9,6 +9,7 @@
 #include <core/errors/error.hpp>
 #include <core/types.hpp>
 #include <core/mesh/mesh_manager.hpp>
+#include <core/mesh/mesh_resolver.hpp>
 #include <core/network/interface.hpp>
 #include <core/network/public_ip.hpp>
 #include <core/network/port_check.hpp>
@@ -30,6 +31,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <random>
+#include <array>
+#include <iomanip>
 #include <string>
 #include <vector>
 
@@ -41,21 +45,22 @@ static void print_usage(const char* prog) {
     std::fprintf(stderr, R"(SMO Admin — Mesh Administration
 
 Usage:
-  %s --mesh-dir <dir> sign <csr-file> -o <output-file>
-  %s --mesh-dir <dir> create-mesh <name>
-  %s --mesh-dir <dir> mesh publish [--listen <addr>] [--advertise <addr>...] [--dns <name>]
-  %s --mesh-dir <dir> generate-invite <role> [--expire <dur>] [--endpoint <ep>]
-  %s --mesh-dir <dir> serve [--port <port>]
-  %s --help
+  %s --mesh <name> <command> [options]
+  %s --mesh-dir <path> <command> [options]
+  %s <command> [options]                     (uses current mesh from context)
 
 Commands:
-  sign            Sign a CSR (.smor) and issue a certificate (.smoc)
-  create-mesh     Initialize a new mesh (generate root + authority keys)
-  mesh publish    Configure network endpoints (bootstrap) for the mesh
-  generate-invite Generate a Join Token for automated enrollment
-  serve           Start enroll HTTP server for zero-touch enrollment
+  sign <csr-file> -o <output-file>   Sign a CSR and issue a certificate
+  create-mesh <name>                  Initialize a new mesh
+  mesh publish [options]              Configure network endpoints
+  generate-invite <role> [options]    Generate a Join Token
+  serve [--port <port>]               Start enroll HTTP server
+
+Options:
+  --mesh <name>        Select mesh by name (stored in ~/.smo/meshes/<name>/)
+  --mesh-dir <path>    Direct path to mesh directory (overrides --mesh)
 )",
-        prog, prog, prog, prog, prog, prog);
+        prog, prog, prog, prog);
 }
 
 // ---------------------------------------------------------------------------
@@ -283,60 +288,44 @@ static int cmd_sign(const std::vector<std::string>& args,
 
 // ---------------------------------------------------------------------------
 // cmd_create_mesh: Initialize new mesh with root + authority keys
+// The mesh_dir is the target directory for the new mesh.
 // ---------------------------------------------------------------------------
 static int cmd_create_mesh(const std::string& name,
-                            const std::string& output_dir) {
-    fs::path base_data_dir = output_dir;
-    fs::create_directories(base_data_dir);
+                            const std::string& mesh_dir) {
+    fs::create_directories(mesh_dir);
 
-    // Use default suite for mesh creation (can be overridden via --suite flag later)
+    // Use default suite for mesh creation
     const smo::CryptoProvider* crypto = nullptr;
     smo::RngRef rng;
     if (!get_crypto(smo::kSuitePurePQC, crypto, rng)) return 1;
 
-    // Create mesh via MeshManager (which writes mesh.json)
-    smo::MeshManager::Config mgr_cfg;
-    mgr_cfg.base_data_dir = base_data_dir.string();
-    smo::MeshManager mgr(mgr_cfg);
-    auto init_result = mgr.initialize();
-    if (!init_result) {
-        std::fprintf(stderr, "Error: failed to initialize mesh manager: %s\n",
-                     init_result.error().message.c_str());
+    // Generate a mesh ID from name + timestamp
+    std::string canonical = name + "|" + std::to_string(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+    auto hash_result = crypto->hash.hash({reinterpret_cast<const uint8_t*>(canonical.data()), canonical.size()});
+    if (!hash_result) {
+        std::fprintf(stderr, "Error: hash failed\n");
         return 1;
     }
+    std::string mesh_id = smo::bytes_to_hex(hash_result.value());
 
-    smo::MeshConfig mesh_cfg;
-    mesh_cfg.display_name = name;
-    mesh_cfg.cipher_suite_id = smo::kSuitePurePQC;
-    mesh_cfg.created_at = std::chrono::duration_cast<std::chrono::milliseconds>(
+    // Generate HMAC secret
+    std::string hmac_secret;
+    {
+        std::random_device rd;
+        std::array<uint8_t, 32> secret{};
+        for (auto& b : secret) b = static_cast<uint8_t>(rd());
+        std::ostringstream oss;
+        for (uint8_t b : secret) oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+        hmac_secret = oss.str();
+    }
+
+    int64_t created_at = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    auto create_result = mgr.create_mesh(mesh_cfg, name);
-    if (!create_result) {
-        std::fprintf(stderr, "Error: failed to create mesh: %s\n",
-                     create_result.error().message.c_str());
-        return 1;
-    }
-
-    // Debug: list all meshes
-    std::fprintf(stderr, "Debug: listing meshes...\n");
-    auto mesh_list = mgr.list_meshes();
-    for (const auto& m : mesh_list) {
-        std::fprintf(stderr, "  Found: %s\n", m.c_str());
-    }
-
-    // Load the created mesh to get its mesh_id and path
-    auto mesh_result = mgr.get_mesh_by_name(name);
-    if (!mesh_result) {
-        std::fprintf(stderr, "Error: failed to load created mesh\n");
-        return 1;
-    }
-    auto mesh_ctx = mesh_result.value();
-    auto& mesh_config = mesh_ctx->config;
-
-    // Now create authority keys via MeshAuthority
-    if (!get_crypto(smo::kSuitePurePQC, crypto, rng)) return 1;
-
+    // Create authority keys via MeshAuthority
     smo::authority::MeshAuthority authority;
     if (auto r = authority.init(*crypto, rng); !r) {
         std::fprintf(stderr, "Error: authority init failed: %s\n",
@@ -344,34 +333,67 @@ static int cmd_create_mesh(const std::string& name,
         return 1;
     }
 
-    smo::authority::MeshAuthority::Config cfg;
-    cfg.mesh_id = mesh_config.mesh_id;
-    cfg.data_dir = mesh_ctx->paths.mesh_dir;
-    cfg.registry_path = mesh_ctx->paths.peers_db;
+    smo::authority::MeshAuthority::Config auth_cfg;
+    auth_cfg.mesh_id = mesh_id;
+    auth_cfg.data_dir = mesh_dir;
+    auth_cfg.registry_path = mesh_dir + "/node_registry.db";
 
     std::string root_pubkey_hex;
-    if (auto r = authority.create_mesh_keys(cfg, *crypto, rng, root_pubkey_hex); !r) {
+    if (auto r = authority.create_mesh_keys(auth_cfg, *crypto, rng, root_pubkey_hex); !r) {
         std::fprintf(stderr, "Error: create mesh keys failed: %s\n",
                      r.error().message.c_str());
         return 1;
     }
 
-    // Also write the root public key hex to a file for reference
-    std::ofstream rpk(mesh_ctx->paths.mesh_dir + "/root.pub.hex");
+    // Read authority public key from disk (written by create_mesh_keys)
+    std::string auth_pub_hex;
+    {
+        std::ifstream pkf(mesh_dir + "/authority.pub", std::ios::binary);
+        if (pkf) {
+            smo::Bytes pk_bytes((std::istreambuf_iterator<char>(pkf)),
+                                 std::istreambuf_iterator<char>());
+            auth_pub_hex = smo::bytes_to_hex(pk_bytes);
+        }
+    }
+
+    // Write mesh.json
+    {
+        std::ofstream mf(mesh_dir + "/mesh.json");
+        mf << "{\n";
+        mf << "  \"mesh_id\": \"" << mesh_id << "\",\n";
+        mf << "  \"display_name\": \"" << name << "\",\n";
+        mf << "  \"authority_pubkey\": \"" << auth_pub_hex << "\",\n";
+        mf << "  \"root_pubkey\": \"" << root_pubkey_hex << "\",\n";
+        mf << "  \"hmac_secret\": \"" << hmac_secret << "\",\n";
+        mf << "  \"cipher_suite_id\": " << static_cast<int>(smo::kSuitePurePQC) << ",\n";
+        mf << "  \"epoch\": 1,\n";
+        mf << "  \"created_at\": " << created_at << "\n";
+        mf << "}\n";
+    }
+
+    // Write root public key hex to a file for reference
+    std::ofstream rpk(mesh_dir + "/root.pub.hex");
     rpk << root_pubkey_hex;
     rpk.close();
 
-    std::printf("Mesh '%s' created at %s\n", name.c_str(), mesh_ctx->paths.mesh_dir.c_str());
-    std::printf("  Mesh ID: %s\n", mesh_config.mesh_id.c_str());
-    std::printf("  Root public key: %s/root.pub.hex\n", mesh_ctx->paths.mesh_dir.c_str());
+    std::printf("Mesh '%s' created at %s\n", name.c_str(), mesh_dir.c_str());
+    std::printf("  Mesh ID: %s\n", mesh_id.c_str());
+    std::printf("  Root public key: %s/root.pub.hex\n", mesh_dir.c_str());
     std::printf("  Authority keys:  %s/authority.pub, %s/authority.sec\n",
-                mesh_ctx->paths.mesh_dir.c_str(), mesh_ctx->paths.mesh_dir.c_str());
-    std::printf("  Root cert:       %s/root.cert\n", mesh_ctx->paths.mesh_dir.c_str());
-    std::printf("  Authority cert:  %s/authority.cert\n", mesh_ctx->paths.mesh_dir.c_str());
-    std::printf("  Node registry:   %s/node_registry.db\n", mesh_ctx->paths.mesh_dir.c_str());
-    std::printf("\n  ⚠️  ROOT PRIVATE KEY NOT SAVED TO DISK!\n");
-    std::printf("     Backup immediately: smo-admin --mesh-dir %s recovery export\n",
-                mesh_ctx->paths.mesh_dir.c_str());
+                mesh_dir.c_str(), mesh_dir.c_str());
+    std::printf("  Root cert:       %s/root.cert\n", mesh_dir.c_str());
+    std::printf("  Authority cert:  %s/authority.cert\n", mesh_dir.c_str());
+    std::printf("  Node registry:   %s/node_registry.db\n", mesh_dir.c_str());
+    std::printf("\n  ROOT PRIVATE KEY NOT SAVED TO DISK!\n");
+    std::printf("  Backup immediately: smo-admin --mesh-dir %s recovery export\n", mesh_dir.c_str());
+
+    // Auto-set as current mesh in context
+    auto ctx_result = smo::mesh::write_current_mesh(name);
+    if (!ctx_result) {
+        std::fprintf(stderr, "Warning: could not update context: %s\n",
+                     ctx_result.error().message.c_str());
+    }
+
     return 0;
 }
 
@@ -719,32 +741,40 @@ static int cmd_mesh_publish(const std::vector<std::string>& args,
     std::printf("%s\n", confirm.c_str());
 
     if (confirm.empty() || confirm[0] == 'y' || confirm[0] == 'Y') {
-        // Prepare bootstrap_endpoints (same as advertise_addresses for now)
-        std::vector<std::string> bootstrap_endpoints = advertise_addresses;
+        // Write updated config directly to mesh.json
+        config.bootstrap_configured = true;
+        config.advertise_addresses = advertise_addresses;
+        config.bootstrap_endpoints = advertise_addresses;
 
-        // Use MeshManager to publish
-        // base_data_dir should be the parent of meshes/ directory
-        smo::MeshManager::Config mgr_cfg;
-        mgr_cfg.base_data_dir = std::filesystem::path(mesh_dir).parent_path().parent_path().string();
-        smo::MeshManager mgr(mgr_cfg);
-        auto init_result = mgr.initialize();
-        if (!init_result) {
-            std::fprintf(stderr, "Error: failed to initialize mesh manager: %s\n",
-                         init_result.error().message.c_str());
+        std::ofstream mf(mesh_dir + "/mesh.json");
+        if (!mf) {
+            std::fprintf(stderr, "Error: cannot write mesh.json at %s\n", mesh_dir.c_str());
             return 1;
         }
-
-        auto publish_result = mgr.publish_mesh(
-            config.mesh_id,
-            listen_addr,
-            advertise_addresses,
-            bootstrap_endpoints
-        );
-        if (!publish_result) {
-            std::fprintf(stderr, "Error: publish failed: %s\n",
-                         publish_result.error().message.c_str());
-            return 1;
+        mf << "{\n";
+        mf << "  \"mesh_id\": \"" << config.mesh_id << "\",\n";
+        mf << "  \"display_name\": \"" << config.display_name << "\",\n";
+        mf << "  \"authority_pubkey\": \"" << config.authority_pubkey << "\",\n";
+        mf << "  \"root_pubkey\": \"" << config.root_pubkey << "\",\n";
+        mf << "  \"hmac_secret\": \"" << config.hmac_secret << "\",\n";
+        mf << "  \"cipher_suite_id\": " << static_cast<int>(config.cipher_suite_id) << ",\n";
+        mf << "  \"epoch\": " << config.epoch << ",\n";
+        mf << "  \"created_at\": " << config.created_at << ",\n";
+        mf << "  \"listen_address\": \"" << listen_addr << "\",\n";
+        mf << "  \"bootstrap_configured\": true,\n";
+        mf << "  \"advertise_addresses\": [";
+        for (size_t i = 0; i < advertise_addresses.size(); ++i) {
+            if (i > 0) mf << ", ";
+            mf << "\"" << advertise_addresses[i] << "\"";
         }
+        mf << "],\n";
+        mf << "  \"bootstrap_endpoints\": [";
+        for (size_t i = 0; i < advertise_addresses.size(); ++i) {
+            if (i > 0) mf << ", ";
+            mf << "\"" << advertise_addresses[i] << "\"";
+        }
+        mf << "]\n";
+        mf << "}\n";
 
         std::printf("\n✓ Mesh '%s' is now online.\n",
                     config.display_name.empty() ? config.mesh_id.c_str() : config.display_name.c_str());
@@ -849,12 +879,20 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Parse --mesh-dir
-    std::string mesh_dir;
+    // Parse --mesh <name> and --mesh-dir <path>
+    std::string mesh_dir_arg;
+    std::string mesh_name_arg;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--mesh-dir") == 0 && i + 1 < argc) {
-            mesh_dir = argv[++i];
-            // Shift remaining args
+            mesh_dir_arg = argv[++i];
+            for (int j = i - 1; j + 2 < argc; ++j) argv[j] = argv[j + 2];
+            argc -= 2;
+            break;
+        }
+    }
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--mesh") == 0 && i + 1 < argc) {
+            mesh_name_arg = argv[++i];
             for (int j = i - 1; j + 2 < argc; ++j) argv[j] = argv[j + 2];
             argc -= 2;
             break;
@@ -872,31 +910,46 @@ int main(int argc, char* argv[]) {
 
     auto cmd = args[0];
 
+    // ── create-mesh: uses name-based resolution ─────────────────────
     if (cmd == "create-mesh") {
         std::string name = (args.size() > 1) ? args[1] : "";
-        std::string output_dir = mesh_dir.empty()
-            ? fs::current_path().string()
-            : mesh_dir;
         if (name.empty()) {
-            std::fprintf(stderr, "Usage: smo-admin --mesh-dir <dir> create-mesh <name>\n");
+            std::fprintf(stderr, "Usage: smo-admin --mesh <name> create-mesh\n");
             return 1;
         }
-        return cmd_create_mesh(name, output_dir);
+
+        std::string mesh_dir;
+        if (!mesh_dir_arg.empty()) {
+            // --mesh-dir <path>: backward compat — path is base_data_dir,
+            // mesh is created at <path>/meshes/<name>/
+            mesh_dir = (fs::path(mesh_dir_arg) / "meshes" / name).string();
+        } else if (!mesh_name_arg.empty()) {
+            // --mesh <name>: create at ~/.smo/meshes/<name>/
+            mesh_dir = smo::mesh::mesh_dir_from_name(mesh_name_arg);
+        } else {
+            // Fallback: use context mesh name, create at ~/.smo/meshes/<name>/
+            mesh_dir = smo::mesh::mesh_dir_from_name(name);
+        }
+
+        return cmd_create_mesh(name, mesh_dir);
     }
 
+    // ── All other commands: resolve mesh dir ────────────────────────
+    // Resolution order: --mesh-dir > --mesh <name> > context > error
+    auto resolution = smo::mesh::resolve_mesh(mesh_dir_arg, mesh_name_arg);
+    if (!resolution) {
+        // Show helpful error with available meshes
+        auto helpful = smo::mesh::require_mesh(mesh_dir_arg, mesh_name_arg);
+        std::fprintf(stderr, "Error: %s\n", helpful.error().message.c_str());
+        return 1;
+    }
+    std::string mesh_dir = resolution.value().dir;
+
     if (cmd == "sign") {
-        if (mesh_dir.empty()) {
-            std::fprintf(stderr, "Error: --mesh-dir is required for sign command\n");
-            return 1;
-        }
         return cmd_sign(args, mesh_dir);
     }
 
     if (cmd == "generate-invite") {
-        if (mesh_dir.empty()) {
-            std::fprintf(stderr, "Error: --mesh-dir is required for generate-invite command\n");
-            return 1;
-        }
         return cmd_generate_invite(args, mesh_dir);
     }
 
@@ -906,15 +959,11 @@ int main(int argc, char* argv[]) {
 
     if (cmd == "mesh") {
         if (args.size() < 2) {
-            std::fprintf(stderr, "Usage: smo-admin --mesh-dir <dir> mesh publish\n");
+            std::fprintf(stderr, "Usage: smo-admin --mesh <name> mesh publish\n");
             return 1;
         }
         auto subcmd = args[1];
         if (subcmd == "publish") {
-            if (mesh_dir.empty()) {
-                std::fprintf(stderr, "Error: --mesh-dir is required for mesh publish\n");
-                return 1;
-            }
             return cmd_mesh_publish(args, mesh_dir);
         }
         std::fprintf(stderr, "Unknown mesh subcommand: %s\n", subcmd.c_str());
