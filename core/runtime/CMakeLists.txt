@@ -4,6 +4,8 @@ add_library(smo_runtime STATIC
     dispatcher.cpp
     output_manager.cpp
     runtime_kernel.cpp
+    runtime_bridge.cpp
+    action_executor.cpp
     middleware.cpp
     plan_executor.cpp
     contract_registry.cpp

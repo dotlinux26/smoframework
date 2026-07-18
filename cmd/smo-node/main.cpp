@@ -33,6 +33,11 @@
 #include <core/recovery/crl.hpp>
 #include <core/network/packet_dispatcher.hpp>
 #include <core/bootstrap/bootstrap_protocol.hpp>
+#include <core/runtime/runtime_bridge.hpp>
+#include <core/runtime/action_executor.hpp>
+#include <core/runtime/dispatcher.hpp>
+#include <core/runtime/contracts/echo_contract.hpp>
+#include <core/runtime/output_manager.hpp>
 
 #include <providers/suite1_classical/suite1_classical_provider.hpp>
 #include <providers/suite3_purepqc/suite3_purepqc_provider.hpp>
@@ -921,60 +926,74 @@ int main(int argc, char* argv[]) {
                     static_cast<int>(ev.type));
     });
 
+    // ── Runtime components (Sprint 37 E2E) ─────────────────────────
+    smo::runtime::EventBus event_bus;
+    smo::runtime::OutputManager output_mgr;
+    smo::runtime::Dispatcher runtime_dispatcher;
+    smo::runtime::PlanResolver plan_resolver;
+    smo::runtime::RuntimeKernel runtime_kernel(
+        event_bus, output_mgr, runtime_dispatcher, plan_resolver);
+
+    // Register EchoContract
+    runtime_dispatcher.register_contract(
+        "system.echo",
+        std::make_unique<smo::runtime::EchoContract>());
+
+    // RuntimeBridge: opcode → contract
+    smo::runtime::RuntimeBridge runtime_bridge(runtime_kernel);
+    runtime_bridge.register_route(
+        static_cast<uint32_t>(smo::Opcode::ECHO),
+        "system.echo", "echo");
+
     // ── PacketDispatcher setup ─────────────────────────────────
-    // Full bootstrap dispatch requires MeshManager + MeshAuthority,
-    // which are created by smo-admin during mesh setup.
-    // Until those are wired into the daemon, bootstrap requests
-    // receive a "not available" response.
+    // All packets go through RuntimeBridge — no switch(opcode).
+    // One handler to rule them all (RFC 0041).
     smo::network::PacketDispatcher dispatcher;
 
-    // Register handler for BOOTSTRAP_REQUEST (opcode 0x0105)
     dispatcher.register_handler(
-        smo::bootstrap::kOpcodeBootstrapRequest,
+        static_cast<uint32_t>(smo::Opcode::ECHO),
         [&](smo::Packet&& pkt, const smo::hl::Endpoint& remote, smo::hl::Transport& t) -> smo::Result<void> {
-            // Decode request
-            auto req = smo::bootstrap::BootstrapRequest::decode_cbor(pkt.payload);
-            if (!req) {
-                std::printf("[smo-node] Invalid bootstrap request: %s\n",
-                            req.error().message.c_str());
-                return req.error();
+            std::string remote_str = remote.address + ":" + std::to_string(remote.port);
+            std::printf("[smo-node] Packet received opcode=0x%x from %s\n",
+                        pkt.opcode_id, remote_str.c_str());
+
+            // Save original packet before moving into bridge
+            auto original_pkt = pkt;
+
+            // 1. Bridge: Packet → RuntimeKernel → RuntimeResult
+            auto rt_result = runtime_bridge.bridge(std::move(pkt));
+            if (!rt_result) {
+                std::printf("[smo-node] RuntimeBridge failed: %s\n",
+                            rt_result.error().message.c_str());
+                return rt_result.error();
             }
 
-            std::printf("[smo-node] BOOTSTRAP_REQUEST from node %s\n",
-                        req.value().node_id.c_str());
-
-            // Build minimal response (full snapshot requires MeshManager + Authority)
-            smo::bootstrap::BootstrapResponse resp;
-            resp.version = smo::bootstrap::kProtocolVersion;
-            resp.nonce = req.value().nonce;
-            resp.snapshot.mesh_id = "pending";
-            resp.snapshot.mesh_state = "Bootstrap";
-            resp.snapshot.epoch = 0;
-            resp.snapshot.health.level = "Recovery";
-            resp.snapshot.health.operational = false;
-
-            auto resp_bytes = resp.encode_cbor();
-
-            smo::Packet resp_pkt;
-            resp_pkt.header.version = 1;
-            resp_pkt.opcode_id = smo::bootstrap::kOpcodeBootstrapResponse;
-            resp_pkt.session_id = pkt.session_id;
-            resp_pkt.intent_id = pkt.intent_id;
-            resp_pkt.timestamp = pkt.timestamp;
-            resp_pkt.nonce = pkt.nonce;
-            resp_pkt.payload = std::move(resp_bytes);
-
-            auto ec = t.send(std::move(resp_pkt), remote);
-            if (ec) {
-                return smo::Error(
-                    smo::ErrorCode(smo::ErrorCategory::Transport,
-                                   static_cast<uint16_t>(ec.value()),
-                                   smo::Severity::Error,
-                                   smo::RetryClass::RetrySafe,
-                                   smo::Recovery::None),
-                    "Failed to send bootstrap response",
-                    __FILE__, __LINE__);
+            // 2. Execute each NextAction via ActionExecutor
+            //    ActionExecutor sends response packets back through t
+            auto& next_actions = rt_result.value().next_actions;
+            for (auto& action : next_actions) {
+                smo::runtime::ActionExecutor executor(
+                    [&](smo::Packet&& resp) -> smo::Result<void> {
+                        auto ec = t.send(std::move(resp), remote);
+                        if (ec) {
+                            return smo::Error(
+                                smo::ErrorCode(smo::ErrorCategory::Transport,
+                                               static_cast<uint16_t>(ec.value()),
+                                               smo::Severity::Error,
+                                               smo::RetryClass::RetrySafe,
+                                               smo::Recovery::None),
+                                "ActionExecutor send failed",
+                                __FILE__, __LINE__);
+                        }
+                        return {};
+                    });
+                auto exec_res = executor.execute(action, original_pkt);
+                if (!exec_res) {
+                    std::printf("[smo-node] ActionExecutor failed: %s\n",
+                                exec_res.error().message.c_str());
+                }
             }
+
             return {};
         }
     );

@@ -29,6 +29,9 @@ enum class Opcode : uint8_t {
     GOV_VOTE        = 0x25,
     GOV_COMMIT      = 0x26,
 
+    // Echo (Sprint 37 E2E test)
+    ECHO       = 0x06,
+
     CUSTOM     = 0xFF,
 };
 

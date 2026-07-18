@@ -73,6 +73,43 @@ Result<RuntimeResult> RuntimeKernel::execute(const RuntimeRequest& req) {
     return result;
 }
 
+Result<RuntimeResult> RuntimeKernel::execute_direct(const RuntimeRequest& req) {
+    // 1. Validate: contract must exist
+    if (req.contract_id.empty()) {
+        return Result<RuntimeResult>(
+            static_cast<Error>(RuntimeError::validation("empty contract_id")));
+    }
+    auto* contract = dispatcher_.get_contract(req.contract_id);
+    if (!contract) {
+        return Result<RuntimeResult>(
+            static_cast<Error>(RuntimeError::not_found("contract not registered: " + req.contract_id)));
+    }
+
+    // 2. Validate input
+    auto val_res = contract->validate(req.input);
+    if (!val_res) {
+        return Result<RuntimeResult>(
+            static_cast<Error>(RuntimeError::validation("input validation: " + val_res.error().message)));
+    }
+
+    // 3. Execute directly (no plan, no middleware, no audit)
+    RuntimeContext ctx;
+    auto exec_res = contract->execute(req.input, ctx);
+    if (!exec_res) {
+        return Result<RuntimeResult>(
+            static_cast<Error>(RuntimeError::contract("execute failed: " + exec_res.error().message)));
+    }
+
+    // 4. Build RuntimeResult with ContractResult and NextActions
+    RuntimeResult result;
+    result.status = RuntimeResult::Status::Success;
+    result.request_id = req.request_id;
+    result.output = std::move(exec_res.value());
+    result.next_actions = result.output->next_actions;
+
+    return result;
+}
+
 Result<std::string> RuntimeKernel::execute_async(const RuntimeRequest& req) {
     auto res = execute(req);
     if (!res) return Result<std::string>(res.error());

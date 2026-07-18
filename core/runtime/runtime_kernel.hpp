@@ -31,8 +31,13 @@ public:
 
     ~RuntimeKernel() = default;
 
-    // Execute a request synchronously
+    // Execute a request synchronously (full pipeline: validate → resolve → plan → middleware → dispatch)
     Result<RuntimeResult> execute(const RuntimeRequest& req);
+
+    // Execute directly — bypasses plan/middleware/audit.
+    // Calls ContractInterface::execute() directly via Dispatcher.
+    // Used by RuntimeBridge for network requests.
+    Result<RuntimeResult> execute_direct(const RuntimeRequest& req);
 
     // Execute asynchronously - returns execution_id
     Result<std::string> execute_async(const RuntimeRequest& req);
