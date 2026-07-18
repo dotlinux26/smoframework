@@ -32,7 +32,7 @@ Result<RuntimeResult> RuntimeBridge::bridge(Packet&& pkt) {
     req.input.arguments = ContextValue(
         Bytes(pkt.payload.begin(), pkt.payload.end()));
 
-    return kernel_.execute_direct(req);
+    return kernel_.execute(req);
 }
 
 } // namespace smo::runtime

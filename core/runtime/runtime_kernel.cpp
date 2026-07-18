@@ -11,6 +11,8 @@
 
 namespace smo::runtime {
 
+using smo::Result;
+
 RuntimeKernel::RuntimeKernel(EventBus& bus,
                              OutputManager& output_mgr,
                              Dispatcher& dispatcher,
@@ -35,25 +37,9 @@ Result<RuntimeResult> RuntimeKernel::execute(const RuntimeRequest& req) {
     SMO_TRY(validate(req, ctx));
     SMO_TRY(resolve(req, ctx));
 
-    if (has_middleware("before_resolve")) {
-        SMO_TRY(run_middlewares("before_resolve", req, ctx));
-    }
-
     SMO_TRY(execute_plan(req, ctx));
 
-    if (has_middleware("before_dispatch")) {
-        SMO_TRY(run_middlewares("before_dispatch", ctx));
-    }
-
     SMO_TRY(dispatch(req, ctx));
-
-    if (has_middleware("after_dispatch")) {
-        SMO_TRY(run_middlewares("after_dispatch", ctx));
-    }
-
-    if (has_middleware("after_commit")) {
-        SMO_TRY(run_middlewares("after_commit", ctx));
-    }
 
     SMO_TRY(collect(ctx));
     SMO_TRY(aggregate(ctx));
@@ -69,43 +55,6 @@ Result<RuntimeResult> RuntimeKernel::execute(const RuntimeRequest& req) {
     result.execution_id = std::to_string(ctx.info.execution_id);
     result.status = RuntimeResult::Status::Success;
     result.elapsed_ns = elapsed;
-
-    return result;
-}
-
-Result<RuntimeResult> RuntimeKernel::execute_direct(const RuntimeRequest& req) {
-    // 1. Validate: contract must exist
-    if (req.contract_id.empty()) {
-        return Result<RuntimeResult>(
-            static_cast<Error>(RuntimeError::validation("empty contract_id")));
-    }
-    auto* contract = dispatcher_.get_contract(req.contract_id);
-    if (!contract) {
-        return Result<RuntimeResult>(
-            static_cast<Error>(RuntimeError::not_found("contract not registered: " + req.contract_id)));
-    }
-
-    // 2. Validate input
-    auto val_res = contract->validate(req.input);
-    if (!val_res) {
-        return Result<RuntimeResult>(
-            static_cast<Error>(RuntimeError::validation("input validation: " + val_res.error().message)));
-    }
-
-    // 3. Execute directly (no plan, no middleware, no audit)
-    RuntimeContext ctx;
-    auto exec_res = contract->execute(req.input, ctx);
-    if (!exec_res) {
-        return Result<RuntimeResult>(
-            static_cast<Error>(RuntimeError::contract("execute failed: " + exec_res.error().message)));
-    }
-
-    // 4. Build RuntimeResult with ContractResult and NextActions
-    RuntimeResult result;
-    result.status = RuntimeResult::Status::Success;
-    result.request_id = req.request_id;
-    result.output = std::move(exec_res.value());
-    result.next_actions = result.output->next_actions;
 
     return result;
 }
@@ -166,48 +115,7 @@ Result<RuntimeResult> RuntimeKernel::resolve(const RuntimeRequest& req, RuntimeC
     return RuntimeResult{RuntimeResult::Status::Success};
 }
 
-bool RuntimeKernel::has_middleware(const std::string& stage) const {
-    auto it = middlewares_.find(stage);
-    return it != middlewares_.end() && !it->second.empty();
-}
-
-Result<RuntimeResult> RuntimeKernel::run_middlewares(const std::string& stage,
-                                                      const RuntimeRequest& req,
-                                                      RuntimeContext& ctx) {
-    auto it = middlewares_.find(stage);
-    if (it == middlewares_.end()) return RuntimeResult{RuntimeResult::Status::Success};
-
-    MiddlewareContext mw_ctx;
-    mw_ctx.request = const_cast<RuntimeRequest*>(&req);
-    mw_ctx.plan_context = &ctx;
-
-    for (auto& mw : it->second) {
-        if (!mw->applies_to(req.contract_id)) continue;
-        auto res = mw->on_stage(static_cast<MiddlewareStage>(0), mw_ctx);
-        if (!res) {
-            return Result<RuntimeResult>(static_cast<Error>(RuntimeError::internal("middleware " + mw->name() + " rejected: " + res.error().message)));
-        }
-    }
-    return RuntimeResult{};
-}
-
-Result<RuntimeResult> RuntimeKernel::run_middlewares(const std::string& stage,
-                                                      RuntimeContext& ctx) {
-    auto it = middlewares_.find(stage);
-    if (it == middlewares_.end()) return RuntimeResult{RuntimeResult::Status::Success};
-
-    MiddlewareContext mw_ctx;
-    mw_ctx.request = nullptr;
-    mw_ctx.plan_context = &ctx;
-
-    for (auto& mw : it->second) {
-        auto res = mw->on_stage(static_cast<MiddlewareStage>(0), mw_ctx);
-        if (!res) {
-            return Result<RuntimeResult>(static_cast<Error>(RuntimeError::internal("middleware " + mw->name() + " rejected: " + res.error().message)));
-        }
-    }
-    return RuntimeResult{};
-}
+// ── Pipeline Stages ─────────────────────────────────────────────────
 
 Result<RuntimeResult> RuntimeKernel::execute_plan(const RuntimeRequest& req, RuntimeContext& ctx) {
     // Re-resolve plan from vars

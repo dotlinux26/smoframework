@@ -32,12 +32,8 @@ public:
     ~RuntimeKernel() = default;
 
     // Execute a request synchronously (full pipeline: validate → resolve → plan → middleware → dispatch)
+    // Single entry point - no execute_direct() bypass
     Result<RuntimeResult> execute(const RuntimeRequest& req);
-
-    // Execute directly — bypasses plan/middleware/audit.
-    // Calls ContractInterface::execute() directly via Dispatcher.
-    // Used by RuntimeBridge for network requests.
-    Result<RuntimeResult> execute_direct(const RuntimeRequest& req);
 
     // Execute asynchronously - returns execution_id
     Result<std::string> execute_async(const RuntimeRequest& req);
@@ -57,12 +53,6 @@ private:
     // Pipeline stages
     Result<RuntimeResult> validate(const RuntimeRequest& req, RuntimeContext& ctx);
     Result<RuntimeResult> resolve(const RuntimeRequest& req, RuntimeContext& ctx);
-    Result<RuntimeResult> run_middlewares(const std::string& stage,
-                                           const RuntimeRequest& req,
-                                           RuntimeContext& ctx);
-    Result<RuntimeResult> run_middlewares(const std::string& stage,
-                                           RuntimeContext& ctx);
-    bool has_middleware(const std::string& stage) const;
     Result<RuntimeResult> execute_plan(const RuntimeRequest& req, RuntimeContext& ctx);
     Result<RuntimeResult> dispatch(const RuntimeRequest& req, RuntimeContext& ctx);
     Result<RuntimeResult> collect(RuntimeContext& ctx);
@@ -71,7 +61,6 @@ private:
     Result<RuntimeResult> complete(RuntimeContext& ctx);
 
     uint64_t next_execution_id_ = 1;
-    std::unordered_map<std::string, std::vector<std::unique_ptr<ExecutionMiddleware>>> middlewares_;
     uint64_t generate_execution_id();
 };
 
