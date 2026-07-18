@@ -83,6 +83,7 @@ const char* to_string(GovernanceAction a) noexcept {
         case GovernanceAction::ChangeGovernanceRules: return "ChangeGovernanceRules";
         case GovernanceAction::DestroyMesh:         return "DestroyMesh";
         case GovernanceAction::ChangeRecovery:      return "ChangeRecovery";
+        case GovernanceAction::CertificateRevocation: return "CertificateRevocation";
         case GovernanceAction::EpochIncrement:      return "EpochIncrement";
         case GovernanceAction::EmergencyLockdown:   return "EmergencyLockdown";
         default:                                    return "Unknown";

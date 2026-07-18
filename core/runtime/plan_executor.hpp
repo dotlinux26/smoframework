@@ -210,10 +210,10 @@ private:
                 ss.max_retries = static_cast<int>(a.max_retries);
                 ss.retry_delay_ns = a.delay_ns;
             },
-            [&](const ActionEmitEvent& a) {
+[&](const ActionEmitEvent& a) {
                 if (ctx.event_bus) {
                     Event e;
-                    e.type = EventType::ExecutionCompleted;
+                    e.type = event_type_from_string(a.event_type);
                     e.timestamp_ns = now_ns();
                     e.source_id = ctx.execution_id;
                     e.details = a.payload;

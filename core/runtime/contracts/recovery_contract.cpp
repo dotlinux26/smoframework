@@ -107,10 +107,12 @@ ContractMetadata RecoveryContract::default_metadata() {
 }
 
 RecoveryContract::RecoveryContract(smo::recovery::RecoveryEngine& engine,
-                                   smo::recovery::CRL* crl)
+                                    smo::recovery::CRL* crl,
+                                    smo::GovernanceEngine& governance_engine)
     : NativeContract(default_metadata())
     , engine_(engine)
-    , crl_(crl) {}
+    , crl_(crl)
+    , governance_engine_(governance_engine) {}
 
 Result<ContractResult> RecoveryContract::execute(
     const ContractInput& input,
@@ -347,13 +349,13 @@ Result<ContractResult> RecoveryContract::handle_cancel(
 }
 
 // ── handle_crl_revoke ───────────────────────────────────────────────
+// Now creates a GovernanceProposal (CertificateRevocation) instead of direct revoke.
+// Governance must approve before CRL revocation.
 Result<ContractResult> RecoveryContract::handle_crl_revoke(
     const ContractInput& input,
     const RuntimeContext& ctx)
 {
     (void)ctx;
-
-    if (!crl_) return ContractResult::denied("CRL not available");
 
     auto fingerprint = map_str(input.arguments, "cert_fingerprint");
     if (!fingerprint) return ContractResult::denied(fingerprint.error().message);
@@ -367,21 +369,53 @@ Result<ContractResult> RecoveryContract::handle_crl_revoke(
     auto epoch = map_uint(input.arguments, "epoch");
     if (!epoch) return ContractResult::denied(epoch.error().message);
 
-    auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    // Build GovernanceProposal for CertificateRevocation
+    smo::GovernanceProposal proposal;
+    proposal.tier = smo::GovernanceTier::Constitution;
+    proposal.level = smo::GovernanceLevel::Critical;
+    proposal.action = smo::GovernanceAction::CertificateRevocation;
+    proposal.threshold = 1; // Will be overridden by engine based on N
+    proposal.created_at = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+    proposal.expires_at = proposal.created_at + 24 * 3600 * 1'000'000'000LL; // 24h TTL
 
-    auto rev_res = crl_->revoke(fingerprint.value(), node_id_hex.value(),
-                                 reason.value(), epoch.value(), now_ns);
-    if (!rev_res) {
-        return ContractResult::denied("revoke failed: " + rev_res.error().message);
+    // Payload: JSON with fingerprint, node_id_hex, reason, epoch
+    std::ostringstream payload_oss;
+    payload_oss << "{"
+        << "\"fingerprint\":\"" << fingerprint.value() << "\","
+        << "\"node_id_hex\":\"" << node_id_hex.value() << "\","
+        << "\"reason\":\"" << reason.value() << "\","
+        << "\"epoch\":" << epoch.value()
+        << "}";
+    proposal.payload = Bytes(payload_oss.str().begin(), payload_oss.str().end());
+
+    // Submit to GovernanceEngine
+    auto id_res = governance_engine_.submit(proposal);
+    if (!id_res) {
+        return ContractResult::denied("submit failed: " + id_res.error().message);
     }
 
-    ContractResult result = ContractResult::ok("certificate revoked");
+    ContractResult result = ContractResult::ok("revocation proposal submitted for governance");
+    result.metrics["proposal_id"] = ContextValue(static_cast<int64_t>(id_res.value().value));
     result.metrics["cert_fingerprint"] = ContextValue(fingerprint.value());
     result.metrics["epoch"] = ContextValue(static_cast<int64_t>(epoch.value()));
+
+    // Emit RecoveryProposalCreated event
+    auto ev = make_event(
+        EventType::RecoveryProposalCreated,
+        "recovery_contract",
+        std::to_string(id_res.value().value),
+        "",
+        "system.recovery",
+        payload_oss.str()
+    );
+    // Note: EventBus publish would need access to runtime EventBus
+    // For now, emit as next_action
     result.next_actions.push_back(
-        emit_event("recovery.cert_revoked",
-                    "fingerprint=" + fingerprint.value()));
+        emit_event("recovery.proposal_created",
+                    "proposal_id=" + std::to_string(id_res.value().value) +
+                    ",fingerprint=" + fingerprint.value()));
+
     return result;
 }
 

@@ -178,6 +178,18 @@ Result<ContractResult> GovernanceContract::handle_commit(
         return ContractResult::denied("commit failed: " + res.error().message);
     }
 
+    // Fetch proposal to check if it's a CertificateRevocation
+    auto prop_res = engine_.get(smo::ProposalID{static_cast<uint64_t>(pid_res.value())});
+    if (prop_res && prop_res.value().action == smo::GovernanceAction::CertificateRevocation) {
+        // Emit RecoveryApproved event for EventBus listeners
+        std::string payload_str(prop_res.value().payload.begin(), prop_res.value().payload.end());
+        ContractResult result = ContractResult::ok("proposal committed");
+        result.metrics["proposal_id"] = ContextValue(pid_res.value());
+        result.next_actions.push_back(
+            emit_event("RecoveryApproved", "CertificateRevocation proposal approved: " + payload_str));
+        return result;
+    }
+
     ContractResult result = ContractResult::ok("proposal committed");
     result.metrics["proposal_id"] = ContextValue(pid_res.value());
     result.next_actions.push_back(

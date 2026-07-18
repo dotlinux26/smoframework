@@ -1008,7 +1008,7 @@ int main(int argc, char* argv[]) {
     runtime_dispatcher.register_contract(
         "system.recovery",
         std::make_unique<smo::runtime::RecoveryContract>(
-            recovery_engine, &crl));
+            recovery_engine, &crl, governance_engine));
 
     // FileContract: filesystem operations
     runtime_dispatcher.register_contract(
@@ -1291,6 +1291,93 @@ int main(int argc, char* argv[]) {
                                           smo::Recovery::None),
                           "Unknown raw protocol", __FILE__, __LINE__);
     });
+
+    // ── EventBus subscriptions (P4: Recovery → Governance → CRL) ────
+    // RecoveryProposalCreated: emitted by RecoveryContract when a revocation proposal is submitted
+    event_bus.subscribe(smo::runtime::EventType::RecoveryProposalCreated,
+        [&](const smo::runtime::Event& ev) {
+            std::printf("[smo-node] Event: RecoveryProposalCreated - %s\n", ev.details.c_str());
+        });
+
+    // RecoveryApproved: emitted by GovernanceContract when CertificateRevocation proposal is committed
+    // Parse payload: {fingerprint, node_id_hex, reason, epoch}
+    // Then: CRL::revoke(fingerprint), SessionManager::invalidate(node_id), Discovery gossip, Audit log
+    event_bus.subscribe(smo::runtime::EventType::RecoveryApproved,
+        [&](const smo::runtime::Event& ev) {
+            std::printf("[smo-node] Event: RecoveryApproved - %s\n", ev.details.c_str());
+
+            // Parse JSON payload from event details
+            // Expected format: "CertificateRevocation proposal approved: {fingerprint, node_id_hex, reason, epoch}"
+            std::string payload = ev.details;
+            size_t brace_pos = payload.find('{');
+            if (brace_pos == std::string::npos) {
+                std::printf("[smo-node] WARNING: RecoveryApproved payload missing JSON\n");
+                return;
+            }
+            std::string json_str = payload.substr(brace_pos);
+
+            // Simple JSON parsing (avoid external dependency for now)
+            auto extract_field = [&](const std::string& json, const std::string& key) -> std::string {
+                std::string search = "\"" + key + "\":\"";
+                size_t pos = json.find(search);
+                if (pos == std::string::npos) return "";
+                pos += search.length();
+                size_t end = json.find('"', pos);
+                if (end == std::string::npos) return "";
+                return json.substr(pos, end - pos);
+            };
+            auto extract_uint = [&](const std::string& json, const std::string& key) -> uint64_t {
+                std::string search = "\"" + key + "\":";
+                size_t pos = json.find(search);
+                if (pos == std::string::npos) return 0;
+                pos += search.length();
+                size_t end = json.find_first_of(",}", pos);
+                if (end == std::string::npos) return 0;
+                return std::stoull(json.substr(pos, end - pos));
+            };
+
+            std::string fingerprint = extract_field(json_str, "fingerprint");
+            std::string node_id_hex = extract_field(json_str, "node_id_hex");
+            std::string reason = extract_field(json_str, "reason");
+            uint64_t epoch = extract_uint(json_str, "epoch");
+
+            if (fingerprint.empty() || node_id_hex.empty()) {
+                std::printf("[smo-node] WARNING: RecoveryApproved payload incomplete\n");
+                return;
+            }
+
+            // 1. CRL::revoke(fingerprint)
+            auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            auto rev_res = crl.revoke(fingerprint, node_id_hex, reason, epoch, now_ns);
+            if (!rev_res) {
+                std::printf("[smo-node] CRL revoke failed: %s\n", rev_res.error().message.c_str());
+            } else {
+                std::printf("[smo-node] CRL: revoked cert %s (epoch=%llu)\n", fingerprint.c_str(), (unsigned long long)epoch);
+            }
+
+            // 2. SessionManager::invalidate(node_id) - convert hex to NodeID
+            if (node_id_hex.size() == 64) { // 32 bytes = 64 hex chars
+                smo::NodeID node_id;
+                for (size_t i = 0; i < 32 && i * 2 + 1 < node_id_hex.size(); ++i) {
+                    unsigned int byte = 0;
+                    std::istringstream iss(node_id_hex.substr(i * 2, 2));
+                    iss >> std::hex >> byte;
+                    node_id.value[i] = static_cast<uint8_t>(byte);
+                }
+                size_t invalidated = session_mgr.invalidate(node_id);
+                std::printf("[smo-node] SessionManager: invalidated %zu sessions for node %s\n",
+                            invalidated, node_id_hex.c_str());
+            }
+
+            // 3. Discovery: gossip CRL update (trigger membership sync)
+            // This will be picked up by the next gossip cycle
+            std::printf("[smo-node] Discovery: CRL update triggered (gossip will propagate)\n");
+
+            // 4. Audit: log revocation
+            std::printf("[smo-node] AUDIT: Certificate revoked - fingerprint=%s node=%s reason=%s epoch=%llu\n",
+                        fingerprint.c_str(), node_id_hex.c_str(), reason.c_str(), (unsigned long long)epoch);
+        });
 
     // ── Main loop ──────────────────────────────────────────────
     std::printf("[smo-node] Entering main loop...\n");

@@ -19,9 +19,8 @@ Result<void> ActionExecutor::execute(const NextAction& action,
             // TODO: implement retry queue
             return Result<void>{};
         },
-        [&](const ActionEmitEvent&) {
-            // TODO: wire EventBus
-            return Result<void>{};
+        [&](const ActionEmitEvent& event) {
+            return on_emit_event(event);
         },
         [&](const ActionStoreContext&) {
             // Applied inline by contract — no action needed
@@ -61,6 +60,17 @@ Result<void> ActionExecutor::on_dispatch_message(
     resp.payload = msg.data;
 
     return send_response_(std::move(resp));
+}
+
+Result<void> ActionExecutor::on_emit_event(const ActionEmitEvent& event) {
+    if (event_bus_) {
+        Event ev;
+        ev.type = event_type_from_string(event.event_type);
+        ev.source_id = "action_executor";
+        ev.details = event.payload;
+        event_bus_->publish(ev);
+    }
+    return {};
 }
 
 } // namespace smo::runtime

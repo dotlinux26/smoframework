@@ -80,13 +80,14 @@ enum class GovernanceAction : uint8_t {
     ChangeGovernanceRules= 11,
     DestroyMesh          = 12,
     ChangeRecovery       = 13,
+    CertificateRevocation = 14,  // Revoke certificate via governance vote
 
     // Legacy (mapped for backward compat)
     PolicyChange     = 7,      // same as ChangePolicy
     AuthorityCreate  = 0,      // same as AddAuthority
     AuthorityRevoke  = 1,      // same as RemoveAuthority
-    EpochIncrement   = 14,
-    EmergencyLockdown= 15,
+    EpochIncrement   = 15,
+    EmergencyLockdown= 16,
 };
 
 const char* to_string(GovernanceAction a) noexcept;
@@ -106,6 +107,7 @@ inline GovernanceTier action_to_tier(GovernanceAction a) noexcept {
         case GovernanceAction::ChangePolicy:
         case GovernanceAction::UpdateManifest:
         case GovernanceAction::UpgradeRuntime:
+        case GovernanceAction::CertificateRevocation:
             return GovernanceTier::Constitution;
 
         case GovernanceAction::ChangeCipherSuite:

@@ -5,6 +5,7 @@
 
 #include "core/recovery/recovery_engine.hpp"
 #include "core/recovery/crl.hpp"
+#include "core/governance/governance.hpp"
 
 #include <string>
 
@@ -13,7 +14,8 @@ namespace smo::runtime {
 class RecoveryContract final : public NativeContract {
 public:
     RecoveryContract(smo::recovery::RecoveryEngine& engine,
-                     smo::recovery::CRL* crl);
+                     smo::recovery::CRL* crl,
+                     smo::GovernanceEngine& governance_engine);
 
     Result<ContractResult> execute(
         const ContractInput& input,
@@ -22,6 +24,7 @@ public:
 private:
     smo::recovery::RecoveryEngine& engine_;
     smo::recovery::CRL* crl_;
+    smo::GovernanceEngine& governance_engine_;
 
     static ContractMetadata default_metadata();
 
