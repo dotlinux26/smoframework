@@ -1180,6 +1180,64 @@ int main(int argc, char* argv[]) {
     dispatcher.register_handler(
         static_cast<uint32_t>(smo::Opcode::PROCESS), runtime_handler);
 
+    // ── Raw handler: discovery protocol (HelloMsg, PingMsg, etc.) ──
+    dispatcher.register_raw_handler(
+        [&](smo::BytesView raw, smo::TcpSession& session,
+            const smo::hl::Endpoint& remote) -> smo::Result<void>
+    {
+        int64_t now_ns = static_cast<int64_t>(
+            std::chrono::system_clock::now().time_since_epoch().count());
+
+        // Convert hl::Endpoint → smo::Endpoint
+        smo::Endpoint ep;
+        ep.scheme = "tcp";
+        ep.host = remote.address;
+        ep.port = remote.port;
+
+        // Try HelloMsg
+        auto hello = smo::HelloMsg::deserialize(raw);
+        if (hello) {
+            std::printf("[smo-node] Raw handler: HelloMsg from %s\n",
+                        remote.address.c_str());
+            auto handle_res = discovery_engine.handle_hello(
+                hello.value(), ep, now_ns);
+            if (!handle_res) {
+                return handle_res.error();
+            }
+
+            // Send WelcomeMsg back
+            auto peer = membership.lookup(hello.value().node_id);
+            if (peer) {
+                smo::WelcomeMsg welcome;
+                welcome.node_id = local_id;
+                welcome.peer_record = peer.value();
+                auto welcome_data = welcome.serialize();
+                auto send_res = session.send(welcome_data);
+                if (!send_res) {
+                    std::printf("[smo-node] Failed to send WelcomeMsg\n");
+                }
+            }
+            return {};
+        }
+
+        // Try PingMsg
+        auto ping = smo::PingMsg::deserialize(raw);
+        if (ping) {
+            smo::PongMsg pong;
+            pong.timestamp = ping.value().timestamp;
+            auto pong_data = pong.serialize();
+            session.send(pong_data);
+            return {};
+        }
+
+        // Unknown raw protocol
+        return smo::Error(smo::ErrorCode(smo::ErrorCategory::Transport, 309,
+                                          smo::Severity::Warn,
+                                          smo::RetryClass::RetrySafe,
+                                          smo::Recovery::None),
+                          "Unknown raw protocol", __FILE__, __LINE__);
+    });
+
     // ── Main loop ──────────────────────────────────────────────
     std::printf("[smo-node] Entering main loop...\n");
 

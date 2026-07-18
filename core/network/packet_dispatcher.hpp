@@ -4,6 +4,7 @@
 #include "transport/transport.h"
 #include "core/transport/transport.hpp"
 #include "core/errors/error.hpp"
+#include "core/types.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -29,6 +30,8 @@ namespace smo::network {
 class PacketDispatcher {
 public:
     using HandlerFunc = std::function<Result<void>(Packet&&, const hl::Endpoint&, hl::Transport&)>;
+    // RawHandler receives raw unframed bytes for protocols that don't use the Packet format
+    using RawHandler = std::function<Result<void>(BytesView, TcpSession&, const hl::Endpoint&)>;
 
     PacketDispatcher() = default;
 
@@ -36,16 +39,21 @@ public:
     void unregister_handler(uint32_t opcode_id);
     bool has_handler(uint32_t opcode_id) const;
 
+    // Register a fallback handler for raw (non-Packet) data.
+    // Called when data cannot be unframed or parsed as a Packet.
+    void register_raw_handler(RawHandler handler);
+
     // Dispatch a packet to its registered handler (high-level transport).
     Result<void> dispatch(Packet&& pkt, const hl::Endpoint& remote, hl::Transport& transport);
 
     // Dispatch a frame from a low-level TcpSession.
-    // Reads one frame, parses as Packet, dispatches, sends response back.
-    // Returns error if no handler registered or read/write fails.
+    // First tries framed Packet format; if that fails, falls back to raw handler.
+    // Returns error if both fail or read/write fails.
     Result<void> dispatch_session(TcpSession& session, const hl::Endpoint& remote);
 
 private:
     std::unordered_map<uint32_t, HandlerFunc> handlers_;
+    RawHandler raw_handler_;
 };
 
 } // namespace smo::network
