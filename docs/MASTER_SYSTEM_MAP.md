@@ -1,35 +1,61 @@
 # ShellMap Master System Map — Đại Kiến Thiết
 
 > Tài liệu tổng hợp toàn bộ hệ thống modules, trạng thái, dependencies,
-> và kiến trúc runtime/authorization/trust pipeline.
+> và kiến trúc runtime/session/trust/policy pipeline.
 
 ---
 
 ## I. TỔNG QUAN KIẾN TRÚC
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                        smo-node Daemon                        │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ Identity  │  │  Crypto   │  │ Transport│  │  Discovery   │ │
-│  │  System   │  │  Suites   │  │  TCP/UDP │  │  + Gossip    │ │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────────┘ │
-│                                                              │
-│  ┌────────────────────────────────────────────────────┐      │
-│  │            Runtime Pipeline (core/runtime)          │      │
-│  │  Packet → Bridge → Authorize → Kernel → Execute    │      │
-│  └────────────────────────────────────────────────────┘      │
-│                                                              │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ Session   │  │  Trust   │  │   CRL    │  │  Governance  │ │
-│  │ Manager   │  │ Manager  │  │ (Revoke) │  │   Engine     │ │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────────┘ │
-│                                                              │
-│  ┌────────────────────────────────────────────────────┐      │
-│  │               6 Native Contracts                     │      │
-│  │  Bootstrap → Join → Recovery → Governance → File → Process│
-│  └────────────────────────────────────────────────────┘      │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                         smo-node Daemon                           │
+│                                                                  │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────────┐ │
+│  │ Identity  │  │  Crypto   │  │ Transport│  │   Discovery     │ │
+│  │  System   │  │  Suites   │  │  TCP/UDP │  │   + Gossip      │ │
+│  └──────────┘  └──────────┘  └──────────┘  └─────────────────┘ │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │               Node Lifecycle FSM                          │   │
+│  │  New → CSR → Certified → Bootstrapping → Joining → Active│   │
+│  │  → Suspended → Recovering → Revoked → Removed            │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                              ↓                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │                 Packet Pipeline                           │   │
+│  │                                                          │   │
+│  │  TCP → Frame → Packet → PacketDispatcher                │   │
+│  │                              ↓                          │   │
+│  │                    SessionManager                        │   │
+│  │                    (verify session, timeout, renewal)    │   │
+│  │                    (CRL check at session creation)       │   │
+│  │                              ↓                          │   │
+│  │                    PolicyEngine                          │   │
+│  │                    (rule evaluate: allow/deny/audit/     │   │
+│  │                     sandbox/ratelimit/readonly)          │   │
+│  │                              ↓                          │   │
+│  │                    RuntimeBridge (THIN)                  │   │
+│  │                    (Packet → RuntimeRequest)            │   │
+│  │                              ↓                          │   │
+│  │                    RuntimeKernel                         │   │
+│  │                    (execute → dispatcher → contract)    │   │
+│  │                              ↓                          │   │
+│  │                    ActionExecutor                        │   │
+│  │                              ↓                          │   │
+│  │                    Packet → TCP                         │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────────┐  │
+│  │ Governance│  │  Trust   │  │   CRL    │  │  Policy Engine │  │
+│  │  Engine   │  │ Manager  │  │ (Revoke) │  │  (rules DB)    │  │
+│  └──────────┘  └──────────┘  └──────────┘  └────────────────┘  │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │               6 Native Contracts                          │   │
+│  │  Bootstrap → Join → Recovery → Governance → File → Process│   │
+│  └──────────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -124,89 +150,97 @@
 
 ---
 
-## III. RUNTIME PIPELINE — LUỒNG XỬ LÝ CHI TIẾT
+## III. PACKET PIPELINE — LUỒNG XỬ LÝ CHI TIẾT
 
-### Hiện tại (Sprint 37)
-
-```
-TCP accept
-    ↓
-PacketDispatcher::dispatch_session()
-    ↓
-Handler lambda [opcode → runtime_handler]
-    ↓
-RuntimeBridge::bridge(Packet&&)
-    ├─ 1. resolve(opcode) → contract_id + method
-    ├─ 2. session_id from packet (16 bytes)
-    ├─ 3. AuthorizationManager::authorize(session_id, contract_meta)
-    │      ├─ Anonymous? → skip
-    │      ├─ Session exists? → lookup
-    │      ├─ Session valid? → state != Closed
-    │      ├─ CRL check? → cert fingerprint revoked?
-    │      ├─ Trust check? → score >= 0.2
-    │      └─ Capability check → session.caps ⊇ contract.caps
-    ├─ 4. Build RuntimeRequest
-    └─ 5. RuntimeKernel::execute_direct(req)
-           ├─ validate(contract exists)
-           ├─ validate(input)
-           └─ contract->execute(input, ctx)
-    ↓
-RuntimeResult (chứa NextActions)
-    ↓
-ActionExecutor::execute(action, original_pkt)
-    └─ ActionDispatchMessage → send response packet
-```
-
-### Authorization Pipeline (AuthorizationManager::authorize)
+### Target Architecture (đúng)
 
 ```
-┌─────────────────────────────────────────────┐
-│           authorize(session_id, meta)        │
-├─────────────────────────────────────────────┤
-│ 1. Contract anonymous? ──────────→ ALLOW    │
-│ 2. Session lookup ───┐                     │
-│    ├─ not found ─────→ DENY (no session)    │
-│    └─ found           │                     │
-│ 3. Session valid?     │                     │
-│    ├─ Closed ────────→ DENY (closed)        │
-│    └─ valid            │                     │
-│ 4. CRL check (nếu có) │                     │
-│    ├─ revoked ───────→ DENY (revoked)       │
-│    └─ not revoked      │                     │
-│ 5. Trust check (nếu có)│                     │
-│    ├─ below 0.2 ─────→ DENY (low trust)    │
-│    └─ sufficient       │                     │
-│ 6. Capability check    │                     │
-│    ├─ insufficient ───→ DENY (no caps)      │
-│    └─ sufficient       │                     │
-│ 7. → ALLOW             │                     │
-└─────────────────────────────────────────────┘
+TCP
+ ↓
+Frame (TCP framing: len + data)
+ ↓
+Packet (opcode + session_id + payload)
+ ↓
+PacketDispatcher
+ ├─ parse opcode
+ ├─ find handler
+ └─ dispatch
+    ↓
+Node Lifecycle FSM
+ ├─ New → CSR Pending → Certified → Bootstrapping → Joining → Syncing → Active
+ ├─ Active → Suspended → Recovering → Revoked → Removed
+ └─ Nếu node không ở Active → DENY (trừ bootstrap/join)
+    ↓
+SessionManager
+ ├─ lookup(session_id)
+ ├─ verify session state (Active/Closed/Expired)
+ ├─ handle timeout & renewal
+ ├─ CRL check at session CREATION (cert not revoked → allow session)
+ └─ Nếu session invalid → DENY
+    ↓
+PolicyEngine
+ ├─ load rules (from governance/policy contract)
+ ├─ evaluate(session, contract, action, context)
+ │   ├─ allow? → tiếp
+ │   ├─ deny?  → DENY + audit log
+ │   ├─ audit? → log + tiếp
+ │   ├─ sandbox? → restrict capabilities
+ │   ├─ ratelimit? → check quota
+ │   └─ readonly? → deny writes
+ └─ Nếu deny → trả về lỗi
+    ↓
+RuntimeBridge (THIN — chỉ convert)
+ ├─ Packet.opcode → contract_id + method
+ ├─ Packet.payload → RuntimeRequest.params
+ └─ RuntimeRequest { contract_id, method, params, session_ctx }
+    ↓
+RuntimeKernel::execute()
+ ├─ validate(contract exists)
+ ├─ validate(input)
+ ├─ contract->execute(input, ctx)
+ └─ return RuntimeResult
+    ↓
+ActionExecutor
+ └─ NextAction → ActionDispatchMessage → TCP response
 ```
 
-### Tương lai (execute() full pipeline)
+### AuthorizationManager hiện tại (Sprint 37 interim — cần refactor)
+
+```
+⚠️ Sprint 37 đang gộp Session + CRL + Trust + Capability vào AuthorizationManager.
+Đây là phiên bản interim để E2E chạy trước.
+Refactor target: tách thành 3 layer riêng (SessionManager → PolicyEngine → RuntimeBridge).
+```
+
+AuthorizationManager Sprint 37:
 
 ```
 RuntimeBridge::bridge()
-    ↓
-AuthorizationManager::authorize()
-    ↓
-PolicyEngine::evaluate(context)
-    ↓
-Middleware::on_stage("before_resolve")
-    ↓
-RuntimeKernel::execute() (full pipeline)
-    ├─ validate
-    ├─ resolve (plan resolution)
-    ├─ before_dispatch middleware
-    ├─ dispatch (contract execution)
-    ├─ after_dispatch middleware
-    ├─ after_commit middleware
-    ├─ collect (gather results)
-    ├─ aggregate
-    ├─ audit
-    └─ complete
-    ↓
-ActionExecutor
+ └─ AuthorizationManager::authorize()
+     ├─ Anonymous? → ALLOW
+     ├─ Session lookup → DENY nếu không found
+     ├─ Session valid? → DENY nếu Closed
+     ├─ CRL check → DENY nếu revoked (sai tầng)
+     ├─ Trust check → DENY nếu < 0.2 (sai tầng)
+     └─ Capability check → DENY nếu thiếu
+```
+
+### SAU REFACTOR (đúng)
+
+```
+SessionManager (độc lập)
+ ├─ lookup(session_id)
+ ├─ CRL check lúc session CREATION
+ └─ verify session state
+
+PolicyEngine (trung tâm)
+ ├─ nhận context: { session, trust, role, caps, mesh, action }
+ ├─ evaluate rules
+ └─ trả về: allow | deny | audit | sandbox | ratelimit | readonly
+
+RuntimeBridge (mỏng)
+ ├─ chỉ convert Packet → RuntimeRequest
+ └─ không biết Session, CRL, Trust, Capability, Policy
 ```
 
 ---
@@ -267,16 +301,50 @@ composite *= factor
 
 ## V. CRL — CERTIFICATE REVOCATION LIST
 
-### Vị trí trong architecture
+### Vị trí đúng trong architecture
+
+CRL check chỉ xảy ra ở **Session Creation**, không phải ở runtime authorization.
+
 ```
-Certificate
-    ↓ (revoked)
-CRL (Certificate Revocation List)
-    ↓ (checked by)
-AuthorizationManager::authorize()
-    ↓ (deny if revoked)
-RuntimeKernel → Contract execution denied
+Certificate presented (TCP handshake / Join / Reconnect / Renewal)
+    ↓
+CRL::is_revoked(fingerprint)
+    ├── revoked? → DENY + không tạo session
+    └── not revoked → cho phép tạo session
+                       ↓
+                Session::create(peer_cert)
+                       ↓
+                SessionManager::open(session)
+
+=== SAU KHI SESSION TỒN TẠI ===
+
+Packet → SessionManager::lookup(id)
+    ├── found & valid? → tiếp PolicyEngine
+    └── not found / closed? → DENY
+        (KHÔNG cần check CRL lại — cert revoked → session đã chết từ trước)
 ```
+
+### Recovery → Governance → CRL flow (đúng)
+
+```
+RecoveryContract phát hiện vi phạm
+    ↓
+RecoveryProposal { node_id, reason, evidence }
+    ↓
+GovernanceEngine::submit(proposal)
+    ↓
+M-of-N vote → approved?
+    ├── no → proposal rejected
+    └── yes → CRL::revoke(fingerprint)
+                ↓
+              SessionManager::invalidate(node_id)
+                ↓
+              TCP disconnect
+                ↓
+              Gossip CRL update → peers
+```
+
+Recovery contract **không revoke trực tiếp**. Nó emit proposal để có audit trail.
 
 ### CRL API (core/recovery/crl.hpp + crl.cpp)
 
@@ -295,19 +363,6 @@ RuntimeKernel → Contract execution denied
 |---------|--------|
 | `RevokeCertMsg` | cert_fingerprint, node_id_hex, reason, epoch, signature |
 | `RevokeAckMsg` | cert_fingerprint, accepted, error_message |
-
-### CRL Sync Flow
-```
-Node A revokes Cert X
-    ↓
-publish RevokeCertMsg → peers
-    ↓
-Node B receives → CRL::revoke()
-    ↓
-AuthorizationManager::authorize()
-    → CRL::is_revoked(cert.fingerprint)
-    → DENY
-```
 
 ---
 
@@ -330,33 +385,287 @@ Closed ──OpenRequest──→ Handshake ──Established──→ Establish
                                               (Renew → Renewing → Established)
 ```
 
+### Session Creation (CRL check tại đây)
+```
+TCP Handshake / Reconnect / Renewal
+    ↓
+Certificate presented
+    ↓
+CRL::is_revoked(cert.fingerprint)
+    ├── YES → reject, close connection
+    └── NO  → tiếp
+                ↓
+Session::create(peer_id, cert, caps)
+    ↓
+SessionManager::open(session)
+    ↓
+Session established (state = Active)
+```
+
+### Session Validation (runtime — không check CRL)
+```
+Packet arrives with session_id
+    ↓
+SessionManager::lookup(session_id)
+    ├── not found → DENY
+    └── found
+        ├── state == Active? → tiếp
+        ├── state == Closed? → DENY
+        └── state == Expired? → DENY + trigger renewal
+```
+
 ### SessionManager API
 | Method | Chức năng |
 |--------|-----------|
-| `open(session)` | Tạo session mới |
-| `lookup(id)` | Tra cứu session |
+| `open(session)` | Tạo session mới (CRL check đã qua) |
+| `lookup(id)` | Tra cứu session (không check CRL) |
 | `close(id, now)` | Đóng session |
+| `invalidate(node_id)` | Đóng tất cả session của node (khi CRL revoke) |
 | `transition(id, event, now)` | FSM transition |
 | `tick(now)` | Expire timeout sessions |
 | `collect_garbage()` | Xóa closed sessions |
 | `serialize_all()` | Persistence |
 
-### Session → Authorization
+### Session attributes (cho Policy Engine)
 ```
-Packet arrives with session_id
-    ↓
-SessionManager::lookup(session_id)
-    ↓
-Session::peer_cert() → CRL::is_revoked(fingerprint)
-    ↓
-Session::capabilities() → ContractCapability check
-    ↓
-Session::peer_id() → TrustManager::get_score()
+Session {
+    peer_id: NodeID
+    certificate: Certificate
+    role: Role (Reader/Contributor/Authority/Admin)
+    capabilities: CapabilitySet
+    trust_score: float (from TrustManager, cached at session start)
+    created_at: timestamp
+    last_active: timestamp
+}
+```
+
+Các attribute này được Policy Engine dùng để evaluate rules, không phải AuthorizationManager.
+
+---
+
+## VII. POLICY ENGINE — TRUNG TÂM QUYẾT ĐỊNH
+
+### Vai trò
+
+Policy Engine là trung tâm quyết định của toàn bộ pipeline.
+Nó thay thế AuthorizationManager làm layer quyết định allow/deny.
+
+AuthorizationManager hiện tại (Sprint 37) sẽ trở thành một **plugin** của Policy Engine.
+
+### Input
+```
+PolicyEngine::evaluate(context)
+    context = {
+        session: { id, role, caps, trust_score, mesh_id, created_at },
+        request: { contract_id, method, params },
+        node:    { state, version, uptime },
+        system:  { time, load, mesh_policy_version }
+    }
+```
+
+### Output
+```
+PolicyDecision {
+    effect: Allow | Deny | Audit | Sandbox | RateLimit | ReadOnly
+    reason: string            // cho audit log
+    ttl:    duration          // cache decision
+    constraints: []string     // sandbox: danh sách restricted ops
+}
+```
+
+### Rule examples
+```
+// File: chỉ cho phép Reader role read, không write
+rule "file_readonly_for_reader"
+    match: contract == "system.file" && role == "Reader"
+    allow if method in ["ls", "stat", "read"]
+    deny  if method in ["write", "rm", "mkdir"]
+
+// Trust threshold
+rule "low_trust_deny"
+    match: trust_score < 0.2
+    deny: all
+
+// Audit sensitive ops
+rule "audit_governance"
+    match: contract == "system.governance"
+    audit: true
+    allow: true
+
+// Mesh isolation
+rule "mesh_isolation"
+    match: mesh_id != local_mesh_id
+    deny: all
+```
+
+### Architecture
+```
+SessionManager → PolicyEngine → RuntimeBridge
+                      ↓
+                 Policy Store (SQLite / Governance contract)
+                      ↓
+                 Rule cache (hot reload)
+```
+
+### Sprint 37 interim
+Hiện tại AuthorizationManager đang hardcode 4 checks:
+1. Anonymous contract check
+2. Session valid check
+3. CRL check (sai tầng — sẽ move về SessionManager)
+4. Trust check (sai tầng — sẽ move vào Policy rules)
+5. Capability check (sẽ move vào Policy rules)
+
+**Refactor target:** AuthorizationManager biến mất, thay bằng PolicyEngine + các rule plugins.
+
+---
+
+## VIII. CAPABILITY & TRUST — THUỘC TÍNH CHO POLICY
+
+### Capability là attribute của Session
+```
+Session.capabilities = CapabilitySet
+    ├── FS_READ, FS_WRITE
+    ├── PROC_EXEC
+    ├── GRANT, REVOKE, POLICY_CHANGE
+    ├── VERIFY
+    ├── HEARTBEAT
+    └── ...
+```
+
+Không có AuthorizationManager check capability.
+Policy rule check:
+
+```
+rule "capability_check"
+    match: contract == "system.file" && method == "write"
+    allow if session.caps contains FS_WRITE
+    deny otherwise
+```
+
+### Trust là attribute của Node
+```
+Node.trust_score = composite (0.0 - 1.0)
+    ├── citizen     × 0.2
+    ├── execution   × 0.5
+    ├── witness     × 0.2
+    └── consistency × 0.1
+```
+
+Không có AuthorizationManager check trust.
+Policy rule check:
+
+```
+rule "trust_threshold"
+    match: contract == "system.governance"
+    allow if node.trust_score >= 0.7   // governance yêu cầu trust cao
+    deny otherwise
+
+rule "bootstrap_low_trust"
+    match: contract == "system.bootstrap"
+    allow if node.trust_score >= 0.0   // không yêu cầu trust
+```
+
+### ContractCapability mapping
+Contract không định nghĩa "cần capability nào".
+Policy định nghĩa:
+
+```
+rule "file_write_needs_fs_write"
+    match: contract == "system.file" && method in ["write", "rm", "mkdir"]
+    allow if session.caps contains FS_WRITE
+    deny otherwise
 ```
 
 ---
 
-## VII. OPCODE ROUTING
+## IX. NODE LIFECYCLE FSM — MESH STATE MACHINE
+
+### Trạng thái
+```
+                    ┌──────────┐
+                    │   NEW    │
+                    └────┬─────┘
+                         │ --init
+                    ┌────▼─────┐
+                    │  IDENTITY │
+                    │   READY   │
+                    └────┬─────┘
+                         │ --export CSR → smo-admin sign
+                    ┌────▼─────┐
+                    │   CSR    │
+                    │  PENDING │
+                    └────┬─────┘
+                         │ --import cert
+                    ┌────▼─────┐
+                    │CERTIFIED │
+                    └────┬─────┘
+                         │ --daemon (first node)
+                    ┌────▼───────┐
+                    │BOOTSTRAPPING│
+                    └────┬───────┘
+                         │ seed response received
+                    ┌────▼────┐
+                    │ JOINING │
+                    └────┬────┘
+                         │ join complete
+                    ┌────▼──────┐
+                    │SYNCHRONIZE│
+                    │   ING     │
+                    └────┬──────┘
+                         │ sync complete
+                    ┌────▼────┐
+                    │ ACTIVE  │◄─────────────────────────────┐
+                    └────┬────┘                              │
+                         │ offline / heartbeat timeout       │
+                    ┌────▼────────┐                           │
+                    │ SUSPENDED   │──reconnect + CRL check──→─┘
+                    └────┬────────┘                           │
+                         │ recovery proposal accepted         │
+                    ┌────▼────────┐                           │
+                    │ RECOVERING  │──recovery complete──────→─┘
+                    └────┬────────┘
+                         │ CRL revoke
+                    ┌────▼────┐
+                    │ REVOKED │
+                    └────┬────┘
+                         │ mesh admin cleanup
+                    ┌────▼────┐
+                    │ REMOVED │
+                    └─────────┘
+```
+
+### Transition events
+
+| Event | From → To | Trigger |
+|-------|-----------|---------|
+| `identity_created` | NEW → IDENTITY_READY | `--init` |
+| `csr_exported` | IDENTITY_READY → CSR_PENDING | `--export` |
+| `cert_imported` | CSR_PENDING → CERTIFIED | `--import` |
+| `bootstrap_start` | CERTIFIED → BOOTSTRAPPING | `--daemon` (seed) |
+| `bootstrap_complete` | BOOTSTRAPPING → JOINING | seed responded |
+| `join_complete` | JOINING → SYNCHRONIZING | join accepted |
+| `sync_complete` | SYNCHRONIZING → ACTIVE | peer table synced |
+| `heartbeat_timeout` | ACTIVE → SUSPENDED | offline > threshold |
+| `reconnect` | SUSPENDED → ACTIVE | reconnect + CRL ok |
+| `recovery_proposed` | ACTIVE/SUSPENDED → RECOVERING | governance proposal |
+| `recovery_complete` | RECOVERING → ACTIVE | recovery success |
+| `cert_revoked` | any → REVOKED | CRL::revoke |
+| `admin_remove` | REVOKED → REMOVED | mesh admin cleanup |
+
+### Runtime chỉ phục vụ ACTIVE nodes
+```
+PacketDispatcher
+    ↓
+NodeLifecycleFSM::get_state(node_id)
+    ├── ACTIVE? → tiếp SessionManager
+    ├── BOOTSTRAPPING/JOINING/SYNCHRONIZING?
+    │   → chỉ cho phép bootstrap/join opcodes
+    └── other? → DENY
+```
+
+---
+
+## X. OPCODE ROUTING
 
 ### Flat Opcodes (Opcode enum)
 
@@ -395,30 +704,7 @@ bridge.set_anonymous("system.join", true);         // no session needed
 
 ---
 
-## VIII. CAPABILITY MAPPING
-
-### ContractCapability (runtime) → Capability (session)
-
-| ContractCapability | Session Capabilities Required |
-|-------------------|------------------------------|
-| Filesystem | FS_READ, FS_WRITE |
-| Scheduler | PROC_EXEC |
-| Governance | GRANT, REVOKE, POLICY_CHANGE |
-| Recovery | GRANT, VERIFY |
-| Identity | VERIFY |
-| Storage | FS_READ, FS_WRITE |
-| Audit | VERIFY |
-| Network | HEARTBEAT |
-| Crypto | (none — infrastructure) |
-| Vault | (none — infrastructure) |
-
-### Anonymous Contracts (no check)
-- `system.bootstrap` — anyone can request bootstrap
-- `system.join` — anyone can join with valid token
-
----
-
-## IX. TESTING STATUS
+## XI. TESTING STATUS
 
 ### Passing Tests (13/18)
 | Test | Status |
@@ -449,7 +735,7 @@ bridge.set_anonymous("system.join", true);         // no session needed
 
 ---
 
-## X. BUILD STATUS — TẤT CẢ TARGET
+## XII. BUILD STATUS — TẤT CẢ TARGET
 
 ```
 smo_core           ── ✅ BUILDING + WIRED (25 sub-modules)
@@ -475,36 +761,53 @@ cmd/smo            ── ❌ NOT BUILDING — orphan
 
 ---
 
-## XI. NEXT STEPS — SPRINT 37+
+## XIII. NEXT STEPS — SPRINT 37+
 
-### Priority 1: AuthorizationManager → PolicyEngine bridge
-- [ ] Fix `core/acl/policy_engine` — thêm CMakeLists.txt, compile
-- [ ] Fix `SMO_ERR_ACL` macro undefined
-- [ ] Wire PolicyEngine vào AuthorizationManager (sau Trust + CRL check)
+### Priority 0: Fix bootstrap framing (E2E blocking)
+- [ ] Align `Bootstrap::find_seed()` wire format with `PacketDispatcher::dispatch_session()` framing
+- [ ] After fix: E2E test 2-node mesh thực tế
+- [ ] After fix: gửi ECHO opcode (0x06) qua TCP → verify RuntimeBridge → PolicyEngine → RuntimeKernel → Contract → ActionExecutor
 
-### Priority 2: execute_direct() → execute() migration
+### Priority 1: Refactor AuthorizationManager → SessionManager + PolicyEngine + thin Bridge
+- [ ] **Tách CRL check ra khỏi AuthorizationManager**: move vào SessionManager::open() — CRL check lúc tạo session, không phải lúc runtime
+- [ ] **Tách Trust check ra khỏi AuthorizationManager**: Trust là attribute của Node, Policy mới evaluate
+- [ ] **Tách Capability check ra khỏi AuthorizationManager**: move vào Policy rules
+- [ ] **Làm RuntimeBridge mỏng**: chỉ convert Packet → RuntimeRequest, không biết Session/CRL/Trust/Capability
+- [ ] **Xóa AuthorizationManager** — thay bằng PolicyEngine
+- [ ] Wire `core/acl/policy_engine` — thêm CMakeLists.txt, compile, fix `SMO_ERR_ACL` macro
+
+### Priority 2: Policy Engine implementation
+- [ ] Policy rule DSL (JSON hoặc custom format)
+- [ ] Policy Store (SQLite-backed, governance-updatable)
+- [ ] Rule cache with hot reload
+- [ ] Evaluate context: { session, request, node, system }
+- [ ] Policy plugins: allow, deny, audit, sandbox, ratelimit, readonly
+
+### Priority 3: Node Lifecycle FSM
+- [ ] FSM implementation (NEW → IDENTITY_READY → CSR_PENDING → CERTIFIED → BOOTSTRAPPING → JOINING → SYNCHRONIZING → ACTIVE → SUSPENDED → RECOVERING → REVOKED → REMOVED)
+- [ ] Wire vào PacketDispatcher: chỉ ACTIVE mới xử lý opcodes
+- [ ] Bootstrap/Join opcodes bypass cho BOOTSTRAPPING/JOINING state
+
+### Priority 4: Recovery → Governance → CRL flow
+- [ ] RecoveryContract emit RecoveryProposal (không revoke trực tiếp)
+- [ ] GovernanceEngine xử lý proposal (M-of-N vote)
+- [ ] CRL revoke sau khi governance approve
+- [ ] SessionManager::invalidate(node_id) disconnect
+- [ ] CRL gossip → peers
+
+### Priority 5: execute_direct() → execute() migration
 - [ ] Wire middleware pipeline (PolicyMiddleware)
 - [ ] Wire audit trail
 - [ ] Remove `execute_direct()` (keep only for debug)
 
-### Priority 3: TrustManager → full integration
+### Priority 6: TrustManager → full integration
 - [ ] Wire `record_success/failure` vào runtime kernel sau mỗi contract execution
 - [ ] Wire `record_offline` vào heartbeat service
 - [ ] Wire `apply_digest` vào gossip engine
 
-### Priority 4: CertificateStore
-- [ ] Tạo CertificateStore (SQLite-backed) để lưu trusted certs
-- [ ] Certificate chain verification trong Authorization pipeline
-
-### Priority 5: E2E Test (2-node mesh)
-- [x] Script 2-node bootstrap + join + governance proposal
-- [x] E2E result: Both nodes start, Node B TCP-connects to Node A, but `PacketDispatcher` fails `Failed to unframe data` — pre-existing bootstrap protocol vs packet format mismatch
-- [ ] Fix bootstrap protocol framing (Bootstrap `find_seed` uses raw CBOR, PacketDispatcher expects opcode+len+payload)
-- [ ] Test CRL revoke + trust score decay
-
 ---
 
-## XII. STORAGE ARCHITECTURE — CẤU TRÚC THƯ MỤC TRÊN ĐĨA
+## XIV. STORAGE ARCHITECTURE — CẤU TRÚC THƯ MỤC TRÊN ĐĨA
 
 ### Default root: `~/.smo/`
 
@@ -569,7 +872,7 @@ smo-node --daemon
 
 ---
 
-## XIII. CLI ECOSYSTEM — CÔNG CỤ DÒNG LỆNH
+## XV. CLI ECOSYSTEM — CÔNG CỤ DÒNG LỆNH
 
 ### 1. smo-node — Node Daemon
 
@@ -639,7 +942,7 @@ STATUS: stub
 
 ---
 
-## XIV. E2E TEST SCENARIOS — KỊCH BẢN KIỂM THỬ THẬT
+## XVI. E2E TEST SCENARIOS — KỊCH BẢN KIỂM THỬ THẬT
 
 ### Scenario 1: Full Lifecycle (hiện tại đã chạy được)
 
@@ -710,7 +1013,7 @@ printf '\x06\x00\x00\x00\x00\x00\x00\x00Hello' | nc 127.0.0.1 9000
 
 ---
 
-## XV. DOCUMENT STATUS
+## XVII. DOCUMENT STATUS
 
 | Document | Path | Status | Content |
 |----------|------|--------|---------|
@@ -723,12 +1026,13 @@ printf '\x06\x00\x00\x00\x00\x00\x00\x00Hello' | nc 127.0.0.1 9000
 
 ---
 
-## XVI. KNOWN BUGS & LIMITATIONS
+## XVIII. KNOWN BUGS & LIMITATIONS
 
 ### Critical
 | Bug | File | Impact |
 |-----|------|--------|
 | Bootstrap protocol framing mismatch | `core/bootstrap/` ↔ `core/network/` | 2-node mesh cannot bootstrap via seed (raw CBOR vs PacketDispatcher format) |
+| **AuthorizationManager chứa logic sai tầng** | `core/runtime/authorization_manager.*` | Session + CRL + Trust + Capability hardcode trong 1 class — cần refactor thành SessionManager + PolicyEngine |
 
 ### Medium
 | Bug | File | Impact |
@@ -736,15 +1040,17 @@ printf '\x06\x00\x00\x00\x00\x00\x00\x00Hello' | nc 127.0.0.1 9000
 | `Identity::transition_to(Enrolled)` không save | `core/identity/` | identity.json stays `KeypairReady` after `--import` |
 | `to_string(GovernanceAction::PolicyChange)` sai | `core/governance/` | governance_model test fails |
 | ASan runtime warning at startup | `cmake/CompilerOptions.cmake` | Non-critical warning, does not affect execution |
+| CRL check đang ở runtime (sai tầng) | `core/runtime/authorization_manager.cpp` | Cần move lên SessionManager::open() |
 
 ### Low
 | Bug | File | Impact |
 |-----|------|--------|
 | `stdout` buffered when not TTY | `cmd/smo-node/main.cpp` | Daemon log invisible until setvbuf fix added |
+| `core/acl/policy_engine` dead code | `core/acl/` | 832 lines không build, không link |
 
 ---
 
-## XVII. FILE MANIFEST — TẤT CẢ FILES MỚI/SỬA (Sprint 37)
+## XIX. FILE MANIFEST — TẤT CẢ FILES MỚI/SỬA (Sprint 37)
 
 ### Created
 | File | Purpose |
