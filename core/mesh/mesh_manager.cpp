@@ -532,7 +532,7 @@ Result<std::string> MeshManager::generate_invite(
         std::chrono::system_clock::now().time_since_epoch()).count();
     int64_t expiry = duration_sec > 0 ? now_sec + duration_sec : 0;
 
-    auto token_result = enroll::generate_token(
+    auto token_result = enroll::generate_token_hmac(
         config.mesh_id,
         config.epoch,
         static_cast<int>(config.cipher_suite_id),

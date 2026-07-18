@@ -11,16 +11,36 @@ namespace smo {
 
 // ---------------------------------------------------------------------------
 // Role — node role within a mesh
+//
+// 6 canonical identity roles (Layer 1). Runtime permissions are governed
+// by Policy (Layer 2) — see core/capability/capability.h.
+//
+// Reader is deprecated → use Member instead. Backward compat is preserved
+// during deserialization with a warning.
 // ---------------------------------------------------------------------------
 enum class Role : uint8_t {
     Root        = 0,
     Authority   = 1,
     Contributor = 2,
-    Reader      = 3,
+    Reader      = 3,  // DEPRECATED — use Member instead
     Observer    = 4,
+    Member      = 5,
+    Recovery    = 6,
 };
 
 const char* to_string(Role r) noexcept;
+
+// Convert deprecated Reader to Member with warning flag
+inline constexpr Role role_deprecate_reader(Role r, bool& warned) {
+    if (r == Role::Reader) {
+        warned = true;
+        return Role::Member;
+    }
+    return r;
+}
+
+// Maximum role value for validation
+inline constexpr Role Role_Max = Role::Recovery;
 
 // ---------------------------------------------------------------------------
 // Certificate error codes (codes 220-229: name/identity validation)

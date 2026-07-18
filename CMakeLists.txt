@@ -46,7 +46,7 @@ add_subdirectory(transport)
 add_subdirectory(trust)
 add_subdirectory(acl)
 add_subdirectory(compiler)
-add_subdirectory(runtime)
+# add_subdirectory(runtime)  # legacy runtime - moved to core/runtime
 add_subdirectory(sdk)
 add_subdirectory(providers)
 add_subdirectory(tooling)

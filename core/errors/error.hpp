@@ -86,6 +86,9 @@ enum class ErrorCategory : uint8_t {
     Compiler    = 12,  // compiler/* — parse, plan, validate, DAG build
     Trust       = 13,  // trust/* + consensus/* — scoring, witness
     Contract    = 14,  // contract/* — registry, ABI, factory, deployment
+    Genesis     = 15,  // genesis/* — bootstrap, slots, recovery package
+    Recovery    = 16,  // recovery/* — soft/hard recovery, CRL, revocation
+    Bootstrap   = 17,  // bootstrap/* — bootstrap protocol, snapshot
 };
 
 // ---------------------------------------------------------------------------
@@ -269,6 +272,12 @@ public:
     SMO_ERR(Compiler, code, sev, retry, rec, msg)
 #define SMO_ERR_TRUST(code, sev, retry, rec, msg) \
     SMO_ERR(Trust, code, sev, retry, rec, msg)
+#define SMO_ERR_GENESIS(code, sev, retry, rec, msg) \
+    SMO_ERR(Genesis, code, sev, retry, rec, msg)
+#define SMO_ERR_RECOVERY(code, sev, retry, rec, msg) \
+    SMO_ERR(Recovery, code, sev, retry, rec, msg)
+#define SMO_ERR_BOOTSTRAP(code, sev, retry, rec, msg) \
+    SMO_ERR(Bootstrap, code, sev, retry, rec, msg)
 
 // ---------------------------------------------------------------------------
 // SMO_TRY — early-return macro for Result<T>

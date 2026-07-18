@@ -38,6 +38,9 @@ enum class IntentType : uint8_t {
     Export,
     Session,
     Trace,
+    Genesis,
+    Governance,
+    Recovery,
 };
 
 struct Intent {

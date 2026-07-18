@@ -325,8 +325,8 @@ private:
 
         auto& token = token_result.value();
 
-        // 2. Validate HMAC
-        auto validate_result = enroll::validate_token(token, hmac_secret_, *hash_);
+        // 2. Validate HMAC (v1 compat)
+        auto validate_result = enroll::validate_token_v1(token, hmac_secret_, *hash_);
         if (!validate_result) {
             resp.status_code = 400;
             resp.status_text = "Bad Request";

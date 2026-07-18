@@ -4,6 +4,7 @@ target_include_directories(smo_core PUBLIC
     ${CMAKE_SOURCE_DIR}
 )
 target_link_libraries(smo_core PUBLIC fmt::fmt)
+target_link_libraries(smo_core PUBLIC smo_blake3_provider)
 
 # ── Sub-modules ──────────────────────────────────────────────────────
 add_subdirectory(intent)
@@ -27,3 +28,7 @@ add_subdirectory(network)
 add_subdirectory(enroll)
 add_subdirectory(authority)
 add_subdirectory(mesh)
+add_subdirectory(genesis)
+add_subdirectory(recovery)
+add_subdirectory(bootstrap)
+add_subdirectory(runtime)

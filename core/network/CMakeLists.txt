@@ -12,6 +12,7 @@ target_sources(smo_core PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/port_check.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dns.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/nat_detect.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/packet_dispatcher.cpp
 )
 
 target_sources(smo_core INTERFACE
@@ -33,4 +34,5 @@ target_sources(smo_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/port_check.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dns.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/nat_detect.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/packet_dispatcher.hpp
 )

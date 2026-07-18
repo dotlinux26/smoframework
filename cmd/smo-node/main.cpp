@@ -27,6 +27,12 @@
 #include <core/certificate/certificate.hpp>
 #include <core/enroll/auto_enroll.hpp>
 #include <core/mesh/mesh_resolver.hpp>
+#include <core/mesh/mesh_manager.hpp>
+#include <core/authority/authority.hpp>
+#include <core/governance/governance.hpp>
+#include <core/recovery/crl.hpp>
+#include <core/network/packet_dispatcher.hpp>
+#include <core/bootstrap/bootstrap_protocol.hpp>
 
 #include <providers/suite1_classical/suite1_classical_provider.hpp>
 #include <providers/suite3_purepqc/suite3_purepqc_provider.hpp>
@@ -35,6 +41,7 @@
 
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <poll.h>
 #include <unistd.h>
 #include <cstdio>
@@ -914,6 +921,64 @@ int main(int argc, char* argv[]) {
                     static_cast<int>(ev.type));
     });
 
+    // ── PacketDispatcher setup ─────────────────────────────────
+    // Full bootstrap dispatch requires MeshManager + MeshAuthority,
+    // which are created by smo-admin during mesh setup.
+    // Until those are wired into the daemon, bootstrap requests
+    // receive a "not available" response.
+    smo::network::PacketDispatcher dispatcher;
+
+    // Register handler for BOOTSTRAP_REQUEST (opcode 0x0105)
+    dispatcher.register_handler(
+        smo::bootstrap::kOpcodeBootstrapRequest,
+        [&](smo::Packet&& pkt, const smo::hl::Endpoint& remote, smo::hl::Transport& t) -> smo::Result<void> {
+            // Decode request
+            auto req = smo::bootstrap::BootstrapRequest::decode_cbor(pkt.payload);
+            if (!req) {
+                std::printf("[smo-node] Invalid bootstrap request: %s\n",
+                            req.error().message.c_str());
+                return req.error();
+            }
+
+            std::printf("[smo-node] BOOTSTRAP_REQUEST from node %s\n",
+                        req.value().node_id.c_str());
+
+            // Build minimal response (full snapshot requires MeshManager + Authority)
+            smo::bootstrap::BootstrapResponse resp;
+            resp.version = smo::bootstrap::kProtocolVersion;
+            resp.nonce = req.value().nonce;
+            resp.snapshot.mesh_id = "pending";
+            resp.snapshot.mesh_state = "Bootstrap";
+            resp.snapshot.epoch = 0;
+            resp.snapshot.health.level = "Recovery";
+            resp.snapshot.health.operational = false;
+
+            auto resp_bytes = resp.encode_cbor();
+
+            smo::Packet resp_pkt;
+            resp_pkt.header.version = 1;
+            resp_pkt.opcode_id = smo::bootstrap::kOpcodeBootstrapResponse;
+            resp_pkt.session_id = pkt.session_id;
+            resp_pkt.intent_id = pkt.intent_id;
+            resp_pkt.timestamp = pkt.timestamp;
+            resp_pkt.nonce = pkt.nonce;
+            resp_pkt.payload = std::move(resp_bytes);
+
+            auto ec = t.send(std::move(resp_pkt), remote);
+            if (ec) {
+                return smo::Error(
+                    smo::ErrorCode(smo::ErrorCategory::Transport,
+                                   static_cast<uint16_t>(ec.value()),
+                                   smo::Severity::Error,
+                                   smo::RetryClass::RetrySafe,
+                                   smo::Recovery::None),
+                    "Failed to send bootstrap response",
+                    __FILE__, __LINE__);
+            }
+            return {};
+        }
+    );
+
     // ── Main loop ──────────────────────────────────────────────
     std::printf("[smo-node] Entering main loop...\n");
 
@@ -947,19 +1012,37 @@ int main(int argc, char* argv[]) {
             last_peerstore_sync = now_ns;
         }
 
-        // Accept TCP connections
+        // Accept TCP connections via PacketDispatcher
         auto tcp_session = lstnr->accept();
         if (tcp_session) {
+            auto remote_str = tcp_session.value()->remote_endpoint().to_string();
             std::printf("[smo-node] Accepted TCP connection from %s\n",
-                        tcp_session.value()->remote_endpoint().to_string().c_str());
+                        remote_str.c_str());
 
-            auto data = tcp_session.value()->recv(4096);
-            if (data) {
-                std::printf("[smo-node] Received %zu bytes from %s\n",
-                            data.value().size(),
-                            tcp_session.value()->remote_endpoint().to_string().c_str());
-                tcp_session.value()->send(data.value());
+            smo::hl::Endpoint remote_ep;
+            auto colon = remote_str.rfind(':');
+            if (colon != std::string::npos) {
+                remote_ep.address = remote_str.substr(0, colon);
+                remote_ep.port = static_cast<uint16_t>(
+                    std::strtoul(remote_str.substr(colon + 1).c_str(), nullptr, 10));
+            } else {
+                remote_ep.address = remote_str;
+                remote_ep.port = 7777;
             }
+
+            auto* tcp_ses = static_cast<smo::TcpSession*>(tcp_session.value().get());
+            if (!tcp_ses) {
+                std::printf("[smo-node] Session is not TCP, skipping\n");
+                tcp_session.value()->close();
+                continue;
+            }
+            auto dispatch_res = dispatcher.dispatch_session(
+                *tcp_ses, remote_ep);
+            if (!dispatch_res) {
+                std::printf("[smo-node] Dispatch failed: %s\n",
+                            dispatch_res.error().message.c_str());
+            }
+
             tcp_session.value()->close();
         }
 

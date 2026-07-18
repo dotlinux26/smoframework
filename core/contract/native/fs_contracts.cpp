@@ -21,7 +21,7 @@ namespace smo::contract::native {
 
 // Helper functions
 namespace {
-    std::string get_permissions(mode_t mode) {
+    std::string permission_bits(mode_t mode) {
         std::string perm;
         perm += (mode & S_IRUSR) ? 'r' : '-';
         perm += (mode & S_IWUSR) ? 'w' : '-';
@@ -56,7 +56,7 @@ namespace {
     }
 
     std::string get_permissions(mode_t mode) {
-        std::string perm = get_permissions(mode & 0777);
+        std::string perm = permission_bits(mode & 0777);
         if (mode & S_ISUID) perm[2] = (mode & S_IXUSR) ? 's' : 'S';
         if (mode & S_ISGID) perm[5] = (mode & S_IXGRP) ? 's' : 'S';
         if (mode & S_ISVTX) perm[8] = (mode & S_IXOTH) ? 't' : 'T';

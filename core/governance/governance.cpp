@@ -1,13 +1,12 @@
 #include "governance.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
+#include <sstream>
 
 namespace smo {
 
-// ===========================================================================
-// Big-endian helpers
-// ===========================================================================
 namespace {
 
 void write_u64(Bytes& out, uint64_t v) {
@@ -48,9 +47,15 @@ uint16_t read_u16(BytesView& data, size_t& offset) {
 
 } // anonymous namespace
 
-// ===========================================================================
-// to_string implementations
-// ===========================================================================
+const char* to_string(GovernanceTier t) noexcept {
+    switch (t) {
+        case GovernanceTier::Membership:   return "Membership";
+        case GovernanceTier::Constitution: return "Constitution";
+        case GovernanceTier::Unanimous:    return "Unanimous";
+        default:                           return "Unknown";
+    }
+}
+
 const char* to_string(GovernanceLevel l) noexcept {
     switch (l) {
         case GovernanceLevel::Local:     return "Local";
@@ -62,26 +67,65 @@ const char* to_string(GovernanceLevel l) noexcept {
     }
 }
 
-const char* to_string(ProposalState s) noexcept {
-    switch (s) {
-        case ProposalState::Draft:     return "Draft";
-        case ProposalState::Signing:   return "Signing";
-        case ProposalState::Committed: return "Committed";
-        case ProposalState::Rejected:  return "Rejected";
-        case ProposalState::Expired:   return "Expired";
-        default:                       return "Unknown";
+const char* to_string(GovernanceAction a) noexcept {
+    switch (a) {
+        case GovernanceAction::AddAuthority:        return "AddAuthority";
+        case GovernanceAction::RemoveAuthority:     return "RemoveAuthority";
+        case GovernanceAction::SuspendAuthority:    return "SuspendAuthority";
+        case GovernanceAction::ResumeAuthority:     return "ResumeAuthority";
+        case GovernanceAction::ChangeMaximum:       return "ChangeMaximum";
+        case GovernanceAction::ChangeMinimum:       return "ChangeMinimum";
+        case GovernanceAction::ChangeQuorum:        return "ChangeQuorum";
+        case GovernanceAction::ChangePolicy:        return "ChangePolicy";
+        case GovernanceAction::UpdateManifest:      return "UpdateManifest";
+        case GovernanceAction::UpgradeRuntime:      return "UpgradeRuntime";
+        case GovernanceAction::ChangeCipherSuite:   return "ChangeCipherSuite";
+        case GovernanceAction::ChangeGovernanceRules: return "ChangeGovernanceRules";
+        case GovernanceAction::DestroyMesh:         return "DestroyMesh";
+        case GovernanceAction::ChangeRecovery:      return "ChangeRecovery";
+        case GovernanceAction::EpochIncrement:      return "EpochIncrement";
+        case GovernanceAction::EmergencyLockdown:   return "EmergencyLockdown";
+        default:                                    return "Unknown";
     }
 }
 
-const char* to_string(GovernanceAction a) noexcept {
-    switch (a) {
-        case GovernanceAction::PolicyChange:      return "PolicyChange";
-        case GovernanceAction::AuthorityCreate:   return "AuthorityCreate";
-        case GovernanceAction::AuthorityRevoke:   return "AuthorityRevoke";
-        case GovernanceAction::EpochIncrement:    return "EpochIncrement";
-        case GovernanceAction::EmergencyLockdown: return "EmergencyLockdown";
-        default:                                  return "Unknown";
+const char* to_string(ProposalState s) noexcept {
+    switch (s) {
+        case ProposalState::Draft:      return "Draft";
+        case ProposalState::Signing:    return "Signing";
+        case ProposalState::Committed:  return "Committed";
+        case ProposalState::Rejected:   return "Rejected";
+        case ProposalState::Expired:    return "Expired";
+        case ProposalState::Conflicted: return "Conflicted";
+        default:                        return "Unknown";
     }
+}
+
+std::string MeshHealth::to_display() const {
+    std::ostringstream os;
+    const char* level_str = "Unknown";
+    switch (level) {
+        case HealthLevel::Healthy:  level_str = "Healthy";   break;
+        case HealthLevel::Warning:  level_str = "Warning";   break;
+        case HealthLevel::Critical: level_str = "Critical";  break;
+        case HealthLevel::Recovery: level_str = "Recovery";  break;
+    }
+
+    os << "State:       " << (operational ? "Operational" : "Degraded") << "\n";
+    os << "Health:      " << level_str << "\n";
+    os << "Authorities: " << online_authorities << "/" << total_authorities
+       << " online (min=" << min_required
+       << ", preferred=" << preferred
+       << ", max=" << maximum << ")\n";
+    os << "Offline:     " << offline_authorities << "\n";
+    os << "Quorum:      " << current_quorum << "/" << required_quorum
+       << " (need " << required_quorum << " to operate)\n";
+    os << "Operational: " << (operational ? "YES" : "NO") << "\n";
+    os << "Fault tolerance: can tolerate "
+       << (offline_authorities >= total_authorities ? 0 : total_authorities - offline_authorities - 1)
+       << " more failure(s)\n";
+
+    return os.str();
 }
 
 // ===========================================================================
@@ -123,6 +167,7 @@ Result<GovernanceSignature> GovernanceSignature::deserialize(BytesView data) {
 Bytes GovernanceProposal::serialize() const {
     Bytes out;
     write_u64(out, id.value);
+    out.push_back(static_cast<uint8_t>(tier));
     out.push_back(static_cast<uint8_t>(level));
     out.push_back(static_cast<uint8_t>(action));
     out.push_back(static_cast<uint8_t>(state));
@@ -149,20 +194,13 @@ Result<GovernanceProposal> GovernanceProposal::deserialize(BytesView data) {
     size_t off = 0;
 
     prop.id.value = read_u64(data, off);
-    if (off >= data.size()) {
+    if (off + 4 > data.size()) {
         return SMO_ERR_GOVERNANCE(810, Error, NoRetry, None,
                                   "truncated proposal header");
     }
+    prop.tier   = static_cast<GovernanceTier>(data[off++]);
     prop.level  = static_cast<GovernanceLevel>(data[off++]);
-    if (off >= data.size()) {
-        return SMO_ERR_GOVERNANCE(810, Error, NoRetry, None,
-                                  "truncated proposal action");
-    }
     prop.action = static_cast<GovernanceAction>(data[off++]);
-    if (off >= data.size()) {
-        return SMO_ERR_GOVERNANCE(810, Error, NoRetry, None,
-                                  "truncated proposal state");
-    }
     prop.state  = static_cast<ProposalState>(data[off++]);
 
     uint32_t payload_len = read_u32(data, off);
@@ -195,10 +233,6 @@ Result<GovernanceProposal> GovernanceProposal::deserialize(BytesView data) {
 // GovernanceEngine
 // ===========================================================================
 Result<ProposalID> GovernanceEngine::submit(GovernanceProposal proposal) {
-    if (proposal.level > GovernanceLevel::Critical) {
-        return SMO_ERR_GOVERNANCE(810, Error, NoRetry, None,
-                                  "invalid governance level");
-    }
     if (proposal.payload.empty()) {
         return SMO_ERR_GOVERNANCE(810, Error, NoRetry, None,
                                   "proposal payload cannot be empty");
@@ -206,9 +240,15 @@ Result<ProposalID> GovernanceEngine::submit(GovernanceProposal proposal) {
 
     ProposalID pid{next_id_++};
     proposal.id = pid;
+    proposal.tier = action_to_tier(proposal.action);
     proposal.state = ProposalState::Signing;
     if (proposal.created_at == 0) proposal.created_at = 0;
-    if (proposal.expires_at == 0) proposal.expires_at = proposal.created_at + 86400000000000LL; // 24h
+    if (proposal.expires_at == 0) {
+        // 48h for Constitution, 24h for Membership
+        int64_t ttl = (proposal.tier >= GovernanceTier::Constitution)
+            ? 172800000000000LL : 86400000000000LL;
+        proposal.expires_at = proposal.created_at + ttl;
+    }
 
     proposals_[pid.value] = std::move(proposal);
     return pid;
@@ -234,7 +274,6 @@ Result<void> GovernanceEngine::sign(ProposalID id, NodeID authority,
                                   "proposal has expired");
     }
 
-    // Check for duplicate signer
     for (const auto& s : prop.signatures) {
         if (s.authority_id == authority) {
             return SMO_ERR_GOVERNANCE(800, Error, NoRetry, GovernanceVote,
@@ -325,9 +364,6 @@ Bytes GovernanceEngine::serialize_all() const {
     return out;
 }
 
-// ===========================================================================
-// GovernanceProposalMsg
-// ===========================================================================
 Bytes GovernanceProposalMsg::serialize() const {
     return proposal.serialize();
 }
@@ -340,9 +376,6 @@ Result<GovernanceProposalMsg> GovernanceProposalMsg::deserialize(BytesView data)
     return msg;
 }
 
-// ===========================================================================
-// GovernanceSignatureMsg
-// ===========================================================================
 Bytes GovernanceSignatureMsg::serialize() const {
     Bytes out;
     write_u64(out, proposal_id.value);
@@ -363,9 +396,6 @@ Result<GovernanceSignatureMsg> GovernanceSignatureMsg::deserialize(BytesView dat
     return msg;
 }
 
-// ===========================================================================
-// GovernanceCommitMsg
-// ===========================================================================
 Bytes GovernanceCommitMsg::serialize() const {
     Bytes out;
     write_u64(out, proposal_id.value);
@@ -381,9 +411,6 @@ Result<GovernanceCommitMsg> GovernanceCommitMsg::deserialize(BytesView data) {
     return msg;
 }
 
-// ===========================================================================
-// EpochIncrementMsg
-// ===========================================================================
 Bytes EpochIncrementMsg::serialize() const {
     Bytes out;
     write_u64(out, new_epoch);

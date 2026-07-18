@@ -172,7 +172,7 @@ add_executable(smo_all_tests EXCLUDE_FROM_ALL
 
 target_link_libraries(smo_all_tests PRIVATE
     smo_core smo_protocol smo_compiler smo_transport
-    smo_storage smo_trust smo_acl smo_runtime
+    smo_storage smo_trust smo_acl smo_legacy_runtime
 )
 
 smo_set_warnings(smo_all_tests)

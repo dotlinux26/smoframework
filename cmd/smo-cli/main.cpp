@@ -1,5 +1,8 @@
 #include "cli_context.hpp"
 #include "intent_parser.hpp"
+#include "core/genesis/genesis.hpp"
+#include "core/governance/governance.hpp"
+#include "core/recovery/recovery_engine.hpp"
 #include "core/enroll/join_token.hpp"
 #include "core/enroll/auto_enroll.hpp"
 #include "core/mesh/mesh_resolver.hpp"
@@ -8,6 +11,7 @@
 #include <providers/suite3_purepqc/suite3_purepqc_provider.hpp>
 
 #include <iostream>
+#include <fstream>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
@@ -47,7 +51,7 @@ public:
         "ls", "cd", "pwd", "info", "exec", "ping", "ps", "kill", "top",
         "deploy", "undeploy", "status", "history", "trace",
         "select", "use", "policy", "control",
-        "mesh", "connect", "disconnect", "context",
+        "mesh", "genesis", "governance", "recovery", "connect", "disconnect", "context",
         "help", "exit", "quit", "clear",
         "get", "put", "sync", "cat", "echo", "touch",
         "mkdir", "rm", "cp", "mv",
@@ -190,6 +194,9 @@ private:
             case IntentType::Control:   return handle_control(intent);
             case IntentType::Context:   return handle_context(intent);
             case IntentType::Mesh:      return handle_mesh(intent);
+            case IntentType::Genesis:   return handle_genesis(intent);
+            case IntentType::Governance:return handle_governance(intent);
+            case IntentType::Recovery:  return handle_recovery(intent);
             case IntentType::Connect:   return handle_connect(intent);
             case IntentType::Disconnect:return handle_disconnect(intent);
             case IntentType::Discover:  return handle_discover(intent);
@@ -574,13 +581,16 @@ private:
             return 0;
         }
         if (intent.flags.count("invite")) {
-            std::string role  = intent.flags.count("role") ? intent.flags.at("role") : "Worker";
+            std::string role    = intent.flags.count("role") ? intent.flags.at("role") : "Member";
+            std::string profile = intent.flags.count("profile") ? intent.flags.at("profile") : "server";
             std::string expire = intent.flags.count("expire") ? intent.flags.at("expire") : "1h";
             auto current = require_current();
             if (!current) { std::cerr << current.error().message << "\n"; return 1; }
             std::string name = current.value();
             std::cout << "Generating invite for mesh '" << name << "'...\n";
-            std::string cmd = "smo-admin --mesh " + name + " generate-invite " + role + " --expire " + expire;
+            std::cout << "  Role:    " << role << "\n";
+            std::cout << "  Profile: " << profile << "\n";
+            std::string cmd = "smo-admin --mesh " + name + " generate-invite " + role + " --profile " + profile + " --expire " + expire;
             int rc = std::system(cmd.c_str());
             if (rc != 0) {
                 std::cerr << "Invite generation failed (run manually: " << cmd << ")\n";
@@ -613,6 +623,44 @@ private:
             }
             return 0;
         }
+        if (intent.flags.count("health")) {
+            auto current = require_current();
+            if (!current) { std::cerr << current.error().message << "\n"; return 1; }
+            std::string mesh_dir = home + "/meshes/" + current.value();
+            std::string manifest_path = mesh_dir + "/mesh.json";
+
+            if (!std::filesystem::exists(manifest_path)) {
+                std::cout << "No genesis manifest found for mesh '" << current.value() << "'.\n";
+                return 0;
+            }
+
+            // Read manifest for authority counts
+            std::ifstream file(manifest_path, std::ios::binary | std::ios::ate);
+            auto fsize = file.tellg();
+            file.seekg(0);
+            Bytes mdata(static_cast<size_t>(fsize));
+            file.read(reinterpret_cast<char*>(mdata.data()), fsize);
+
+            auto manifest = smo::genesis::GenesisManifest::deserialize(mdata);
+            if (!manifest) {
+                std::cout << "Failed to read manifest.\n";
+                return 0;
+            }
+
+            auto& m = manifest.value();
+
+            // TODO: read actual online/offline counts from registry
+            uint32_t online = 0;
+            uint32_t total = m.authorities.preferred;
+
+            auto health = smo::compute_health(total, online,
+                                               m.authorities.minimum,
+                                               m.authorities.preferred,
+                                               m.authorities.maximum);
+            std::cout << "Mesh: " << current.value() << "\n";
+            std::cout << health.to_display();
+            return 0;
+        }
         if (intent.flags.count("leave")) {
             context_.set_mesh("");
             std::cout << "Left current mesh.\n";
@@ -623,6 +671,334 @@ private:
             std::cout << (mesh ? mesh.value() : "(none)") << "\n";
             return 0;
         }
+        return 0;
+    }
+
+    Result<int> handle_genesis(const Intent& intent) {
+        std::string home = smo::mesh::smo_home();
+
+        if (intent.flags.count("create")) {
+            std::string name = intent.flags.at("create");
+            std::string profile_str = intent.flags.count("profile") ? intent.flags.at("profile") : "enterprise";
+            uint32_t authorities = 3;
+            if (intent.flags.count("authorities")) {
+                try { authorities = std::stoul(intent.flags.at("authorities")); }
+                catch (...) { std::cerr << "Invalid authorities count\n"; return 1; }
+            }
+
+            std::string mesh_dir = home + "/meshes/" + name;
+            if (std::filesystem::exists(mesh_dir + "/mesh.json")) {
+                std::cerr << "Mesh '" << name << "' already exists.\n";
+                return 1;
+            }
+
+            std::filesystem::create_directories(mesh_dir);
+
+            auto profile_res = smo::genesis::deployment_profile_from_string(profile_str);
+            if (!profile_res) {
+                std::cerr << "Error: " << profile_res.error().message << "\n";
+                return 1;
+            }
+            auto profile = std::move(profile_res).value();
+
+            smo::genesis::GenesisCryptoProvider crypto_provider;
+            crypto_provider.hash = [](const std::string& s) -> Result<Bytes> {
+                (void)s;
+                return Bytes{};
+            };
+            crypto_provider.encrypt_keypair = [](BytesView data, BytesView key) -> Result<Bytes> {
+                (void)key;
+                return Bytes(data.begin(), data.end());
+            };
+            crypto_provider.verify = [](BytesView data, BytesView sig, BytesView pubkey) -> Result<bool> {
+                (void)data; (void)sig; (void)pubkey;
+                return true;
+            };
+
+            smo::genesis::GenesisWizard wizard(std::move(crypto_provider));
+
+            // Placeholder: root key generation not yet wired
+            auto result = wizard.run_stage_0(
+                name,
+                "root-node",
+                "placeholder-root-pubkey",
+                nullptr,
+                profile,
+                authorities,
+                "recovery-passphrase",
+                0
+            );
+
+            if (!result) {
+                std::cerr << "Genesis failed: " << result.error().message << "\n";
+                return 1;
+            }
+
+            auto genesis_res = std::move(result).value();
+
+            // Save manifest
+            auto manifest_res = genesis_res.manifest.serialize();
+            if (!manifest_res) {
+                std::cerr << "Failed to serialize manifest\n";
+                return 1;
+            }
+            auto manifest_data = std::move(manifest_res).value();
+            auto manifest_path = mesh_dir + "/mesh.json";
+            std::ofstream(manifest_path, std::ios::binary)
+                .write(reinterpret_cast<const char*>(manifest_data.data()), manifest_data.size());
+            genesis_res.mesh_json_path = manifest_path;
+
+            // Save recovery package
+            auto recovery_res = genesis_res.recovery_pkg.serialize();
+            if (recovery_res) {
+                auto recovery_data = std::move(recovery_res).value();
+                auto recovery_path = mesh_dir + "/recovery.pkg";
+                std::ofstream(recovery_path, std::ios::binary)
+                    .write(reinterpret_cast<const char*>(recovery_data.data()), recovery_data.size());
+                genesis_res.recovery_pkg_path = recovery_path;
+            }
+
+            // Generate join tokens / slot codes
+            std::vector<std::string> join_codes;
+            for (size_t i = 0; i < genesis_res.slot_ring.slots.size(); ++i) {
+                std::ostringstream code;
+                code << "SMO-BOOT-" << name << "-" << std::setw(3) << std::setfill('0') << i;
+                join_codes.push_back(code.str());
+            }
+
+            context_.set_mesh(name);
+
+            std::cout << "\n";
+            std::cout << "  Genesis created!\n";
+            std::cout << "\n";
+            std::cout << "  Mesh:        " << name << "\n";
+            std::cout << "  Profile:     " << profile_str << "\n";
+            std::cout << "  Authorities: " << authorities << " slots\n";
+            std::cout << "  State:       Bootstrap\n";
+            std::cout << "\n";
+            std::cout << "  Join codes for each authority machine:\n";
+            for (size_t i = 0; i < join_codes.size(); ++i) {
+                std::cout << "    Slot #" << (i + 1) << ": " << join_codes[i] << "\n";
+            }
+            std::cout << "\n";
+            std::cout << "  On each machine, run:\n";
+            std::cout << "    smo join " << join_codes[0] << "\n";
+            std::cout << "\n";
+            std::cout << "  Files:\n";
+            std::cout << "    " << manifest_path << "\n";
+            std::cout << "    " << genesis_res.recovery_pkg_path << "\n";
+
+            return 0;
+        }
+
+        if (intent.flags.count("status")) {
+            auto current = context_.get_current_mesh();
+            if (!current || current.value().empty()) {
+                std::cout << "No mesh selected. Use 'mesh use <name>' first.\n";
+                return 0;
+            }
+            std::string mesh_dir = home + "/meshes/" + current.value();
+            std::string manifest_path = mesh_dir + "/mesh.json";
+
+            if (!std::filesystem::exists(manifest_path)) {
+                std::cout << "Mesh '" << current.value() << "' has no genesis manifest yet.\n";
+                return 0;
+            }
+
+            // Read manifest
+            std::ifstream file(manifest_path, std::ios::binary | std::ios::ate);
+            auto size = file.tellg();
+            file.seekg(0);
+            Bytes data(static_cast<size_t>(size));
+            file.read(reinterpret_cast<char*>(data.data()), size);
+
+            auto manifest = smo::genesis::GenesisManifest::deserialize(data);
+            if (!manifest) {
+                std::cout << "Failed to read manifest: " << manifest.error().message << "\n";
+                return 0;
+            }
+
+            auto& m = manifest.value();
+            std::cout << "Genesis Status:\n";
+            std::cout << "  Mesh:     " << m.mesh_id << "\n";
+            std::cout << "  State:    " << m.state << "\n";
+            std::cout << "  Profile:  " << to_string(m.profile) << "\n";
+            std::cout << "  Epoch:    " << m.epoch << "\n";
+            std::cout << "  Version:  " << m.manifest_version << "\n";
+            std::cout << "  Authorities: min=" << m.authorities.minimum
+                      << " preferred=" << m.authorities.preferred
+                      << " max=" << m.authorities.maximum << "\n";
+            return 0;
+        }
+
+        if (intent.flags.count("manifest")) {
+            std::string mesh_dir = home + "/meshes/" + intent.flags.at("manifest");
+            std::string manifest_path = mesh_dir + "/mesh.json";
+            if (!std::filesystem::exists(manifest_path)) {
+                std::cerr << "Manifest not found: " << manifest_path << "\n";
+                return 1;
+            }
+            std::ifstream file(manifest_path);
+            std::cout << file.rdbuf();
+            return 0;
+        }
+
+        std::cout << "Usage:\n";
+        std::cout << "  genesis create <name> [--profile PROFILE] [--authorities N]\n";
+        std::cout << "  genesis status\n";
+        std::cout << "  genesis manifest <name>\n";
+        return 0;
+    }
+
+    Result<int> handle_governance(const Intent& intent) {
+        if (intent.flags.count("propose")) {
+            smo::GovernanceEngine engine;
+            smo::GovernanceProposal prop;
+            prop.action = smo::GovernanceAction::AddAuthority;
+            prop.payload = Bytes{0x01};  // placeholder
+            prop.created_at = 0;
+
+            auto pid = engine.submit(std::move(prop));
+            if (!pid) {
+                std::cerr << "Failed to create proposal: " << pid.error().message << "\n";
+                return 1;
+            }
+            std::cout << "Proposal created: ID=" << pid.value().value << "\n";
+            std::cout << "Action: " << to_string(prop.action) << "\n";
+            std::cout << "Tier: " << to_string(action_to_tier(prop.action)) << "\n";
+            std::cout << "Threshold: " << prop.threshold << "\n";
+            return 0;
+        }
+
+        if (intent.flags.count("list")) {
+            std::cout << "Governance proposals:\n";
+            std::cout << "  (Governance list not yet persisted)\n";
+            return 0;
+        }
+
+        if (intent.flags.count("status")) {
+            std::cout << "Governance Engine:\n";
+            std::cout << "  Tier: Membership (Level A) / Constitution (Level B) / Unanimous\n";
+            std::cout << "  Membership quorum:     ceil(2N/3)\n";
+            std::cout << "  Constitution quorum:   ceil(3N/4)\n";
+            std::cout << "  Unanimous:             N/N\n";
+            return 0;
+        }
+
+        std::cout << "Usage:\n";
+        std::cout << "  governance propose <action> [--tier membership|constitution]\n";
+        std::cout << "  governance list\n";
+        std::cout << "  governance status\n";
+        return 0;
+    }
+
+    Result<int> handle_recovery(const Intent& intent) {
+        std::string home = smo::mesh::smo_home();
+        auto current = context_.get_current_mesh();
+
+        if (intent.flags.count("restore")) {
+            if (!current) {
+                std::cerr << "No mesh selected. Use 'mesh use <name>' first.\n";
+                return 1;
+            }
+            std::string mesh_dir = home + "/meshes/" + current.value();
+
+            std::string passphrase = intent.flags.count("passphrase")
+                ? intent.flags.at("passphrase") : "";
+
+            if (passphrase.empty()) {
+                std::cout << "Recovery passphrase required. Use --passphrase <phrase>\n";
+                return 1;
+            }
+
+            smo::recovery::RecoveryConfig cfg;
+            cfg.recovery_pkg_path = mesh_dir + "/recovery.pkg";
+            cfg.manifest_path     = mesh_dir + "/mesh.json";
+            cfg.registry_path     = mesh_dir + "/node_registry.db";
+
+            smo::recovery::RecoveryEngine engine(cfg);
+
+            auto mode = engine.assess_mode(5, 3, 3);
+            if (mode == smo::recovery::RecoveryMode::None) {
+                std::cout << "Mesh has sufficient quorum; no recovery needed.\n";
+                return 0;
+            }
+
+            auto session = engine.start_soft(
+                current.value(), "root-node", 1, passphrase, 0);
+
+            if (!session) {
+                std::cerr << "Soft recovery failed: " << session.error().message << "\n";
+                return 1;
+            }
+
+            std::cout << "Soft recovery started.\n";
+            std::cout << "Session: " << session.value().session_id << "\n";
+            std::cout << "New epoch will be: " << session.value().new_epoch << "\n";
+            return 0;
+        }
+
+        if (intent.flags.count("force")) {
+            if (!current) {
+                std::cerr << "No mesh selected. Use 'mesh use <name>' first.\n";
+                return 1;
+            }
+            std::string mesh_dir = home + "/meshes/" + current.value();
+
+            std::string passphrase = intent.flags.count("passphrase")
+                ? intent.flags.at("passphrase") : "";
+
+            if (passphrase.empty()) {
+                std::cout << "WARNING: Hard recovery invalidates ALL certificates.\n";
+                std::cout << "Recovery passphrase required. Use --passphrase <phrase>\n";
+                return 1;
+            }
+
+            std::cout << "WARNING: Hard recovery will:\n";
+            std::cout << "  1. Increment epoch (invalidate all certs)\n";
+            std::cout << "  2. Clear all authorities\n";
+            std::cout << "  3. Require fresh bootstrap\n";
+            std::cout << "\nType 'yes' to confirm: ";
+            std::string confirm;
+            std::getline(std::cin, confirm);
+            if (confirm != "yes") {
+                std::cout << "Hard recovery cancelled.\n";
+                return 0;
+            }
+
+            smo::recovery::RecoveryConfig cfg;
+            cfg.recovery_pkg_path = mesh_dir + "/recovery.pkg";
+            cfg.manifest_path     = mesh_dir + "/mesh.json";
+            cfg.registry_path     = mesh_dir + "/node_registry.db";
+
+            smo::recovery::RecoveryEngine engine(cfg);
+
+            auto session = engine.start_hard(
+                current.value(), "root-node", 1, passphrase, 0);
+
+            if (!session) {
+                std::cerr << "Hard recovery failed: " << session.error().message << "\n";
+                return 1;
+            }
+
+            std::cout << "Hard recovery session created.\n";
+            std::cout << "Session: " << session.value().session_id << "\n";
+            std::cout << "New epoch: " << session.value().new_epoch << "\n";
+            std::cout << "Execute with: recovery commit\n";
+            return 0;
+        }
+
+        if (intent.flags.count("status")) {
+            std::cout << "Recovery status:\n";
+            std::cout << "  Mode: " << (current ? current.value() : "(no mesh)") << "\n";
+            std::cout << "  Recovery: Not in progress\n";
+            return 0;
+        }
+
+        std::cout << "Usage:\n";
+        std::cout << "  recovery restore [--passphrase PHRASE]\n";
+        std::cout << "  recovery force --passphrase PHRASE\n";
+        std::cout << "  recovery status\n";
         return 0;
     }
 

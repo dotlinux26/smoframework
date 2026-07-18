@@ -7,6 +7,8 @@
 #include <core/crypto/suite.hpp>
 #include <core/enroll/join_token.hpp>
 #include <core/errors/error.hpp>
+#include <core/genesis/recovery_package.hpp>
+#include <core/genesis/root_session.hpp>
 #include <core/types.hpp>
 #include <core/mesh/mesh_manager.hpp>
 #include <core/mesh/mesh_resolver.hpp>
@@ -292,6 +294,7 @@ static int cmd_sign(const std::vector<std::string>& args,
 // ---------------------------------------------------------------------------
 static int cmd_create_mesh(const std::string& name,
                             const std::string& mesh_dir) {
+    std::fprintf(stderr, "WARNING: 'create-mesh' is deprecated. Use 'smo genesis create' instead.\n");
     fs::create_directories(mesh_dir);
 
     // Use default suite for mesh creation
@@ -409,6 +412,7 @@ static int cmd_create_mesh(const std::string& name,
 static int cmd_generate_invite(const std::vector<std::string>& args,
                                 const std::string& mesh_dir) {
     std::string role;
+    std::string profile;
     std::string expire_dur = "1h";
     std::vector<std::string> endpoints;
 
@@ -417,6 +421,8 @@ static int cmd_generate_invite(const std::vector<std::string>& args,
             expire_dur = args[++i];
         } else if (args[i] == "--endpoint" && i + 1 < args.size()) {
             endpoints.push_back(args[++i]);
+        } else if (args[i] == "--profile" && i + 1 < args.size()) {
+            profile = args[++i];
         } else if (role.empty() && !args[i].starts_with("-")) {
             role = args[i];
         }
@@ -427,11 +433,11 @@ static int cmd_generate_invite(const std::vector<std::string>& args,
         return 1;
     }
 
-    // Read mesh.json
-    std::string path = mesh_dir + "/mesh.json";
-    std::ifstream f(path);
+    // ── Read mesh.json for metadata ─────────────────────────────────
+    std::string json_path = mesh_dir + "/mesh.json";
+    std::ifstream f(json_path);
     if (!f) {
-        std::fprintf(stderr, "Error: no mesh.json found at %s\n", path.c_str());
+        std::fprintf(stderr, "Error: no mesh.json found at %s\n", json_path.c_str());
         return 1;
     }
     std::string json((std::istreambuf_iterator<char>(f)),
@@ -439,14 +445,8 @@ static int cmd_generate_invite(const std::vector<std::string>& args,
 
     std::string mesh_id         = json_read_string(json, "mesh_id");
     if (mesh_id.empty()) mesh_id = fs::path(mesh_dir).filename().string();
-    std::string hmac_secret_hex = json_read_string(json, "hmac_secret");
     int64_t mesh_epoch          = json_read_int(json, "epoch", 1);
     auto suite_id               = read_suite_from_mesh(mesh_dir);
-
-    if (hmac_secret_hex.empty()) {
-        std::fprintf(stderr, "Error: mesh.json has no hmac_secret\n");
-        return 1;
-    }
 
     // If no manual endpoints provided, read bootstrap_endpoints from mesh.json
     if (endpoints.empty()) {
@@ -477,16 +477,69 @@ static int cmd_generate_invite(const std::vector<std::string>& args,
         return 1;
     }
 
-    Bytes hmac_secret;
-    for (size_t i = 0; i + 1 < hmac_secret_hex.size(); i += 2) {
-        char buf[3] = {hmac_secret_hex[i], hmac_secret_hex[i+1], 0};
-        hmac_secret.push_back(static_cast<uint8_t>(std::strtoul(buf, nullptr, 16)));
+    // ── Load recovery package ───────────────────────────────────────
+    std::string pkg_path = mesh_dir + "/recovery.pkg";
+    std::ifstream pf(pkg_path, std::ios::binary);
+    if (!pf) {
+        std::fprintf(stderr, "Error: no recovery.pkg found at %s\n"
+                             "  Run 'smo genesis create' to generate one.\n",
+                     pkg_path.c_str());
+        return 1;
+    }
+    std::string pkg_json((std::istreambuf_iterator<char>(pf)),
+                          std::istreambuf_iterator<char>());
+    auto pkg_res = smo::genesis::RecoveryPackage::deserialize(
+        BytesView(reinterpret_cast<const uint8_t*>(pkg_json.data()), pkg_json.size()));
+    if (!pkg_res) {
+        std::fprintf(stderr, "Error: failed to parse recovery package: %s\n",
+                     pkg_res.error().message.c_str());
+        return 1;
+    }
+    auto recovery_pkg = std::move(pkg_res).value();
+
+    // ── Get passphrase ──────────────────────────────────────────────
+    const char* env_pw = std::getenv("SMO_RECOVERY_PASSPHRASE");
+    std::string passphrase;
+    if (env_pw && env_pw[0]) {
+        passphrase = env_pw;
+    } else {
+        std::fprintf(stderr, "Recovery passphrase: ");
+        std::fflush(stderr);
+        std::getline(std::cin, passphrase);
     }
 
+    // ── Get crypto provider ─────────────────────────────────────────
     const smo::CryptoProvider* crypto = nullptr;
     smo::RngRef rng;
     if (!get_crypto(suite_id, crypto, rng)) return 1;
 
+    // ── Unlock recovery package → SoftwareSignerContext ─────────────
+    auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    auto session_res = recovery_pkg.unlock(
+        passphrase, crypto->hash, crypto->aead, crypto->signer, rng);
+    if (!session_res) {
+        std::fprintf(stderr, "Error: failed to unlock recovery package: %s\n",
+                     session_res.error().message.c_str());
+        return 1;
+    }
+    auto session = std::move(session_res).value();
+
+    // ── Activate RootSession ─────────────────────────────────────────
+    // activate() with null signer keeps the existing one from unlock()
+    session.activate(
+        "invite-" + std::to_string(now_ns),
+        "root",
+        recovery_pkg.root_public_key,
+        nullptr, // keep signer from unlock()
+        smo::genesis::SessionPolicy::bootstrap(),
+        nullptr, // no-op audit sink
+        now_ns,
+        std::chrono::hours(1).count() * 1'000'000'000ULL // 1h TTL
+    );
+
+    // ── Parse expiry ───────────────────────────────────────────────
     int64_t expiry = 0;
     if (!expire_dur.empty() && expire_dur != "0") {
         char unit = expire_dur.back();
@@ -504,18 +557,60 @@ static int cmd_generate_invite(const std::vector<std::string>& args,
         expiry = now + num * mult;
     }
 
-    auto token_result = smo::enroll::generate_token(
-        mesh_id, mesh_epoch, static_cast<int>(suite_id),
-        endpoints, role, expiry, hmac_secret, crypto->hash
-    );
-    if (!token_result) {
-        std::fprintf(stderr, "Error: token generation failed: %s\n",
-                     token_result.error().message.c_str());
+    // ── Build JoinToken and sign via RootSession ────────────────────
+    smo::enroll::Admission admission;
+    admission.role = role;
+    admission.profile = profile;
+
+    smo::enroll::JoinToken token;
+    token.version = 1;
+    token.mesh_id = mesh_id;
+    token.mesh_epoch = mesh_epoch;
+    token.cipher_suite_id = static_cast<int>(suite_id);
+    token.bootstrap_endpoints = endpoints;
+    token.admission = admission;
+    token.expiry_unix_sec = expiry;
+    {
+        std::random_device rd;
+        std::array<uint8_t, 16> nonce_bytes{};
+        for (auto& b : nonce_bytes) b = static_cast<uint8_t>(rd());
+        std::ostringstream oss;
+        for (auto b : nonce_bytes) oss << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+        token.nonce = oss.str();
+    }
+    token.issuer = "root:" + recovery_pkg.root_public_key.substr(0, 16);
+
+    // Serialize payload and sign
+    auto payload = token.serialize_payload();
+    smo::genesis::RootRequest req;
+    req.operation    = smo::genesis::RootOperation::SignJoinToken;
+    req.payload      = Bytes(payload.begin(), payload.end());
+    req.mesh_id      = mesh_id;
+    req.requester    = "admin";
+    req.reason       = "generate-invite role=" + role;
+    req.timestamp_ns = now_ns;
+
+    auto exec_res = session.execute(req, rng, now_ns);
+    if (!exec_res) {
+        std::fprintf(stderr, "Error: signing failed: %s\n",
+                     exec_res.error().message.c_str());
         return 1;
     }
+    auto root_res = std::move(exec_res).value();
+    token.signature = std::move(root_res.output);
 
-    auto wire = smo::enroll::encode_token_wire(token_result.value());
+    // ── Encode and output ──────────────────────────────────────────
+    auto wire = smo::enroll::encode_token_wire(token);
     std::printf("%s\n", wire.c_str());
+
+    // ── Consume session ─────────────────────────────────────────────
+    auto consume_res = session.consume(now_ns);
+    if (!consume_res) {
+        std::fprintf(stderr, "Warning: session consume failed: %s\n",
+                     consume_res.error().message.c_str());
+    }
+    // Session destroyed automatically on scope exit
+
     return 0;
 }
 

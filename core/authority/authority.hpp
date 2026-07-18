@@ -46,15 +46,33 @@ public:
 
     // ── Root / Authority Key Management ──────────────────────────
 
+    // DEPRECATED — use the genesis flow instead.
+    //   smo genesis create  (Stage 0 + Stage 1)
+    //
     // Create mesh: generate Root keypair + first Authority keypair
     // root_pubkey_out: output hex of root public key
     // recovery_out: output AES-256-GCM encrypted recovery package
+    [[deprecated("Use genesis flow: smo genesis create")]]
     Result<void> create_mesh_keys(const Config& config,
                                    const CryptoProvider& crypto,
                                    RngRef& rng,
                                    std::string& root_pubkey_out);
 
-    // ── CSR Signing ──────────────────────────────────────────────
+    // ── Bootstrap Signing (Root during Genesis/Bootstrap) ────────
+
+    struct BootstrapSignRequest {
+        Bytes csr_blob;            // Serialized CSR from joining node
+        std::string mesh_id;
+        std::string slot_token;    // Bootstrap Slot token for verification
+        uint32_t slot_index;
+    };
+
+    // Sign a CSR during bootstrap. Validates slot token first, then
+    // issues a certificate. Called by Root during Stage 1.
+    // Returns: slot-signed Certificate
+    Result<Certificate> sign_bootstrap_csr(const BootstrapSignRequest& req);
+
+    // ── CSR Signing (Authority runtime) ──────────────────────────
 
     // Sign a CSR: validate, issue certificate, log to registry
     // csr_blob: raw serialized CSR bytes

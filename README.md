@@ -8,8 +8,7 @@
   <a href="SPEC.md"><img src="https://img.shields.io/badge/docs-SPEC.md-blueviolet?style=flat-square" alt="Docs"></a>
   <a href="https://github.com/D-O-T-Solutions/smoframework"><img src="https://img.shields.io/badge/repo-D--O--T--Solutions%2Fsmoframework-6366f1?style=flat-square&logo=github" alt="GitHub"></a>
   <img src="https://img.shields.io/badge/c++-20-00599C?style=flat-square&logo=c%2B%2B" alt="C++20">
-  <img src="https://img.shields.io/badge/tests-31%2F31-brightgreen?style=flat-square" alt="Tests">
-  <img src="https://img.shields.io/badge/status-sprint%203-blue?style=flat-square" alt="Sprint 3">
+  <img src="https://img.shields.io/badge/status-sprint%2036D-blue?style=flat-square" alt="Sprint 36D">
   <img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="Build">
 </p>
 
@@ -24,18 +23,24 @@
 
 | Area | Status |
 |------|--------|
-| Crypto Suite Freeze (RFC 0024) — 3 suites | done |
-| Contract Architecture (RFC 0023) | done |
-| Storage — SQLite: session, node, DAG, audit, trust | done |
-| Protocol v1 — packet, signing, encryption, replay | done |
-| Identity & Certificate — Ed25519, enrollment | done |
-| Transport — abstract layer, TCP, framing | done |
-| Contract Runtime — Compiler, Executor, Runtime::execute() | done |
-| Contract ABI — ABI Hash, Semantic Hash, AbiRegistry | done |
-| Kernel Contracts — 7 kernel contracts, polymorphic dispatch | done |
-| Discovery — Ping/pong response, gossip engine | done |
-| Platform — Linux Tier 1 (Windows Tier 2 in progress) | WIP |
-| Tests — 31/31 (PQC=ON), 27/27 (PQC=OFF) | done |
+| Crypto Suite Freeze (RFC 0024) — 3 suites | ✅ done |
+| Contract Architecture (RFC 0023) | ✅ done |
+| Storage — SQLite: session, node, DAG, audit, trust | ✅ done |
+| Protocol v1 — packet, signing, encryption, replay | ✅ done |
+| Identity & Certificate — Ed25519, enrollment | ✅ done |
+| Transport — abstract layer, TCP/UDP, framing | ✅ done |
+| Bootstrap Protocol (RFC 0034) — CBOR, slot-based join | ✅ done |
+| PKI & Governance (RFC 0033) — 2-tier, mesh FSM, recovery | ✅ done |
+| Signature Join Token v2 — CBOR + Ed25519 | ✅ done |
+| Mesh Genesis — Stage 0/1, SlotRing, Manifest | ✅ done |
+| Runtime Kernel — Pipeline, Dispatcher, EventBus | ✅ done |
+| Contract ABI (RFC 0036) — ContextValue, NextAction, lifecycle | ✅ done |
+| Runtime Services (RFC 0037) — 15 injected services | ✅ done |
+| Execution State Machine (RFC 0038) — 12-step FSM, compensation | ✅ done |
+| Contract Registry & Manager (RFC 0040) — lifecycle + metadata | ✅ done |
+| Native Contracts — Join, Bootstrap, Governance, Recovery, File, Process | ✅ done |
+| Discovery — Ping/pong response, gossip engine | ✅ done |
+| Platform — Linux Tier 1 | ✅ stable |
 
 ### Crypto Suites
 
@@ -49,18 +54,24 @@
 
 ```
 cmd/          CLI — smo-cli, smo-node, smo-admin, smo-debug
-core/         crypto, intents, opcodes, identity, sessions, contracts, FSM
-compiler/     Intent → DAG: graph, parser, planner, validator, optimizer
-runtime/      execution engine, FSM, scheduler, sandbox, worker pool
+core/
+├── runtime/  kernel, dispatcher, contracts (Join, Bootstrap, Governance, Recovery, File, Process)
+├── genesis/  SlotRing, Manifest, RecoveryPackage, RootSession, GenesisWizard
+├── bootstrap/ CBOR, BootstrapSnapshot, BootstrapProtocol
+├── governance/ 2-tier proposals, GovernanceEngine, MeshHealth
+├── recovery/ Soft/Hard recovery, RecoverySession, CRL
+├── enroll/  JoinToken v2 (CBOR + signature)
+├── transport/ TCP (+framing), UDP, TransportRegistry
+├── network/  PacketDispatcher, HeartbeatService
+├── session/  Session FSM, SessionManager
+├── opcode/   OpcodeRegistry
+└── ...       crypto, identity, certificate, FSM, storage, authority, mesh, trust
 protocol/     wire format, packet, signing, encryption, replay, schema
-providers/    suite providers — Classical, Modern, PurePQC
-transport/    TCP, QUIC, relay, serialization
+runtime/      (migrating to core/runtime/)
+transport/    high-level TCP, QUIC, relay (partial)
 storage/      session, trust, audit, DAG, node stores
 trust/        scoring, decay, exchange, store
-acl/          policy engine, presets, revocation
-sdk/          client library & plugin interface
-tooling/      tracing, metrics, profiling, audit viewer
-tests/        unit, integration, mesh, chaos, replay, adversarial
+tests/        unit, integration, mesh, chaos
 third_party/  Monocypher 4.0.2 (CC0)
 ```
 
@@ -83,9 +94,9 @@ Requires: CMake 3.20+, C++20 compiler, OpenSSL dev headers.
 | Document | Purpose |
 |----------|---------|
 | [SPEC.md](SPEC.md) | Definitions, invariants, protocols |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Design rationale |
-| [RFC/](RFC/) | Proposals 0006–0024 |
-| [docs/STABILITY.md](docs/STABILITY.md) | Frozen API/ABI |
+| [RFC/](RFC/) | Proposals 0006–0040 |
+| [docs/PLAN.md](docs/PLAN.md) | Sprint roadmap |
+| [ARCHITECTURE_SUMMARY.md](ARCHITECTURE_SUMMARY.md) | Architecture overview & status (Vietnamese) |
 
 ### License
 

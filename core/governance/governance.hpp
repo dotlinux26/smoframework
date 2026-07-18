@@ -12,7 +12,7 @@
 namespace smo {
 
 // ===========================================================================
-// Governance error codes (800-811)
+// Governance error codes (800-811 + new)
 // ===========================================================================
 namespace GovernanceErrc {
     inline constexpr ErrorCode
@@ -25,10 +25,27 @@ namespace GovernanceErrc {
     ProposalInvalid(ErrorCategory::Governance, 810, Severity::Error, RetryClass::NoRetry, Recovery::None);
     inline constexpr ErrorCode
     EpochIncrementFailed(ErrorCategory::Governance, 807, Severity::Critical, RetryClass::NoRetry, Recovery::ManualIntervention);
+    inline constexpr ErrorCode
+    UnanimousRequired(ErrorCategory::Governance, 811, Severity::Error, RetryClass::NoRetry, Recovery::ManualIntervention);
+    inline constexpr ErrorCode
+    ProposalConflict(ErrorCategory::Governance, 812, Severity::Warn, RetryClass::NoRetry, Recovery::GovernanceVote);
+    inline constexpr ErrorCode
+    ActionNotAllowed(ErrorCategory::Governance, 813, Severity::Error, RetryClass::NoRetry, Recovery::ManualIntervention);
 } // namespace GovernanceErrc
 
 // ===========================================================================
-// GovernanceLevel — 5-tier model per RFC 0016 §2
+// GovernanceTier — 2-tier governance model
+// ===========================================================================
+enum class GovernanceTier : uint8_t {
+    Membership   = 0,  // Level A: registry only, no epoch++
+    Constitution = 1,  // Level B: manifest_version++, epoch++, broadcast
+    Unanimous    = 2,  // Subset of Constitution requiring full consensus
+};
+
+const char* to_string(GovernanceTier t) noexcept;
+
+// ===========================================================================
+// GovernanceLevel — 5-tier model per RFC 0016 §2 (kept for compat)
 // ===========================================================================
 enum class GovernanceLevel : uint8_t {
     Local     = 0,  // 1-of-1 (self)
@@ -41,30 +58,101 @@ enum class GovernanceLevel : uint8_t {
 const char* to_string(GovernanceLevel l) noexcept;
 
 // ===========================================================================
-// ProposalState — lifecycle of a governance proposal
-// ===========================================================================
-enum class ProposalState : uint8_t {
-    Draft     = 0,  // Being created, not yet circulating
-    Signing   = 1,  // Collecting signatures
-    Committed = 2,  // Threshold met, enacted
-    Rejected  = 3,  // Threshold expired or conflicting proposal won
-    Expired   = 4,  // TTL elapsed without reaching threshold
-};
-
-const char* to_string(ProposalState s) noexcept;
-
-// ===========================================================================
 // GovernanceAction — type of change being proposed
 // ===========================================================================
 enum class GovernanceAction : uint8_t {
-    PolicyChange     = 0,  // Modify mesh policy
-    AuthorityCreate  = 1,  // Add a new Authority
-    AuthorityRevoke  = 2,  // Remove an Authority
-    EpochIncrement   = 3,  // Increment the capability epoch
-    EmergencyLockdown= 4,  // Emergency mesh lockdown
+    // Level A — Membership (registry only)
+    AddAuthority      = 0,
+    RemoveAuthority   = 1,
+    SuspendAuthority  = 2,
+    ResumeAuthority   = 3,
+
+    // Level B — Constitution (manifest_version++, epoch++)
+    ChangeMaximum     = 4,
+    ChangeMinimum     = 5,
+    ChangeQuorum      = 6,
+    ChangePolicy      = 7,
+    UpdateManifest    = 8,
+    UpgradeRuntime    = 9,
+
+    // Unanimous (Constitution + unanimous)
+    ChangeCipherSuite    = 10,
+    ChangeGovernanceRules= 11,
+    DestroyMesh          = 12,
+    ChangeRecovery       = 13,
+
+    // Legacy (mapped for backward compat)
+    PolicyChange     = 7,      // same as ChangePolicy
+    AuthorityCreate  = 0,      // same as AddAuthority
+    AuthorityRevoke  = 1,      // same as RemoveAuthority
+    EpochIncrement   = 14,
+    EmergencyLockdown= 15,
 };
 
 const char* to_string(GovernanceAction a) noexcept;
+
+// ── Map action → tier ─────────────────────────────────────────────────
+inline GovernanceTier action_to_tier(GovernanceAction a) noexcept {
+    switch (a) {
+        case GovernanceAction::AddAuthority:
+        case GovernanceAction::RemoveAuthority:
+        case GovernanceAction::SuspendAuthority:
+        case GovernanceAction::ResumeAuthority:
+            return GovernanceTier::Membership;
+
+        case GovernanceAction::ChangeMaximum:
+        case GovernanceAction::ChangeMinimum:
+        case GovernanceAction::ChangeQuorum:
+        case GovernanceAction::ChangePolicy:
+        case GovernanceAction::UpdateManifest:
+        case GovernanceAction::UpgradeRuntime:
+            return GovernanceTier::Constitution;
+
+        case GovernanceAction::ChangeCipherSuite:
+        case GovernanceAction::ChangeGovernanceRules:
+        case GovernanceAction::DestroyMesh:
+        case GovernanceAction::ChangeRecovery:
+            return GovernanceTier::Unanimous;
+
+        case GovernanceAction::EpochIncrement:
+            return GovernanceTier::Constitution;
+
+        case GovernanceAction::EmergencyLockdown:
+            return GovernanceTier::Membership;
+
+        default:
+            return GovernanceTier::Constitution;
+    }
+}
+
+// ── Default quorum per action (given N total authorities) ──────────────
+inline int default_quorum(GovernanceAction a, int total_authorities) {
+    if (total_authorities < 1) return 1;
+    auto tier = action_to_tier(a);
+    switch (tier) {
+        case GovernanceTier::Unanimous:
+            return total_authorities;
+        case GovernanceTier::Constitution:
+            return std::max(1, (3 * total_authorities + 3) / 4);  // ceil(3N/4)
+        case GovernanceTier::Membership:
+        default:
+            return std::max(1, (2 * total_authorities + 2) / 3);  // ceil(2N/3)
+    }
+}
+
+// ===========================================================================
+// ProposalState — lifecycle of a governance proposal
+// ===========================================================================
+enum class ProposalState : uint8_t {
+    Draft      = 0,  // Being created, not yet circulating
+    Signing    = 1,  // Collecting signatures
+    Committed  = 2,  // Threshold met, enacted
+    Rejected   = 3,  // Threshold expired or conflicting proposal won
+    Expired    = 4,  // TTL elapsed without reaching threshold
+    Conflicted = 5,  // Conflicting proposal won
+};
+
+const char* to_string(ProposalState s) noexcept;
 
 // ===========================================================================
 // ProposalID — unique identifier for a proposal
@@ -93,21 +181,20 @@ struct GovernanceSignature {
 // ===========================================================================
 struct GovernanceProposal {
     ProposalID      id;
-    GovernanceLevel level      = GovernanceLevel::Authority;
-    GovernanceAction action    = GovernanceAction::PolicyChange;
-    Bytes           payload;  // Action-specific opaque data
+    GovernanceTier  tier        = GovernanceTier::Membership;
+    GovernanceLevel level       = GovernanceLevel::Authority;
+    GovernanceAction action     = GovernanceAction::AddAuthority;
+    Bytes           payload;   // Action-specific opaque data
     int64_t         created_at  = 0;
     int64_t         expires_at  = 0;
     ProposalState   state       = ProposalState::Draft;
-    int             threshold   = 1;    // M-of-N: M signatures required
+    int             threshold   = 1;
     std::vector<GovernanceSignature> signatures;
 
-    // Check if the required number of distinct signatures have been collected
     bool threshold_met() const noexcept {
         return static_cast<int>(signatures.size()) >= threshold;
     }
 
-    // Check if the proposal has expired
     bool is_expired(int64_t now) const noexcept {
         return expires_at > 0 && now >= expires_at;
     }
@@ -115,6 +202,59 @@ struct GovernanceProposal {
     Bytes serialize() const;
     static Result<GovernanceProposal> deserialize(BytesView data);
 };
+
+// ===========================================================================
+// MeshHealth — mesh health status and display
+// ===========================================================================
+enum class HealthLevel : uint8_t {
+    Healthy  = 0,
+    Warning  = 1,
+    Critical = 2,
+    Recovery = 3,
+};
+
+struct MeshHealth {
+    uint32_t total_authorities    = 0;
+    uint32_t online_authorities   = 0;
+    uint32_t offline_authorities  = 0;
+    uint32_t min_required         = 1;
+    uint32_t preferred            = 3;
+    uint32_t maximum              = 7;
+    int      current_quorum       = 0;
+    int      required_quorum      = 0;
+    bool     operational          = false;
+    HealthLevel level             = HealthLevel::Recovery;
+
+    std::string to_display() const;
+};
+
+inline MeshHealth compute_health(uint32_t total, uint32_t online,
+                                  uint32_t min_req, uint32_t preferred,
+                                  uint32_t maximum) {
+    MeshHealth h;
+    h.total_authorities   = total;
+    h.online_authorities  = online;
+    h.offline_authorities = total > online ? total - online : 0;
+    h.min_required        = min_req;
+    h.preferred           = preferred;
+    h.maximum             = maximum;
+    h.current_quorum      = default_quorum(GovernanceAction::ChangePolicy, static_cast<int>(online));
+    h.required_quorum     = default_quorum(GovernanceAction::ChangePolicy, static_cast<int>(total));
+
+    h.operational = online >= h.required_quorum;
+
+    if (online == 0) {
+        h.level = HealthLevel::Recovery;
+    } else if (online < min_req) {
+        h.level = HealthLevel::Critical;
+    } else if (online < preferred) {
+        h.level = HealthLevel::Warning;
+    } else {
+        h.level = HealthLevel::Healthy;
+    }
+
+    return h;
+}
 
 // ===========================================================================
 // GovernanceEngine — manages proposals and executes them
@@ -158,8 +298,6 @@ private:
 // ===========================================================================
 // Wire message types
 // ===========================================================================
-
-// GOVERNANCE_PROPOSAL message: full proposal
 struct GovernanceProposalMsg {
     GovernanceProposal proposal;
 
@@ -167,7 +305,6 @@ struct GovernanceProposalMsg {
     static Result<GovernanceProposalMsg> deserialize(BytesView data);
 };
 
-// GOVERNANCE_SIGNATURE message: proposal_id + signature
 struct GovernanceSignatureMsg {
     ProposalID proposal_id;
     GovernanceSignature signature;
@@ -176,7 +313,6 @@ struct GovernanceSignatureMsg {
     static Result<GovernanceSignatureMsg> deserialize(BytesView data);
 };
 
-// GOVERNANCE_COMMIT message: proposal_id + result
 struct GovernanceCommitMsg {
     ProposalID proposal_id;
     bool       accepted = false;
@@ -185,7 +321,6 @@ struct GovernanceCommitMsg {
     static Result<GovernanceCommitMsg> deserialize(BytesView data);
 };
 
-// EPOCH_INCREMENT message: new epoch value + signatures
 struct EpochIncrementMsg {
     uint64_t new_epoch = 0;
     std::vector<GovernanceSignature> signatures;

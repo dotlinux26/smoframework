@@ -278,12 +278,16 @@ Every module returns `Result<T, Error>`. Every `Error` carries:
 | 809 | MESH_SPLIT_DETECTED | C | N | M | Mesh partition detected; governance histories diverged |
 | 810 | GOVERNANCE_PROPOSAL_INVALID | E | N | N | Governance proposal format or content is invalid |
 | 811 | ROOT_KEY_REQUIRED | C | N | M | This operation requires the Root Key (offline recovery) |
+| 812 | PROPOSAL_CONFLICT | W | N | G | Conflicting proposal detected; one proposal wins, other is blocked |
+| 813 | ACTION_NOT_ALLOWED | E | N | M | This action is not allowed under the current governance tier |
 
 **Recovery notes:**
 - `AUTHORITY_CONFLICT` → runtime enters POLICY_CONFLICT; operator must submit resolution proposal.
 - `EMERGENCY_LOCKDOWN` → all new contracts rejected; existing executions drained.
 - `ROOT_KEY_REQUIRED` → operator must retrieve Recovery Package and reconstruct Root Key offline.
 - `MESH_SPLIT_DETECTED` → no automatic merge; see §33.8.
+- `PROPOSAL_CONFLICT` → conflicting proposal is rejected; winning proposal proceeds.
+- `ACTION_NOT_ALLOWED` → operator must choose a different governance tier for this action.
 
 ---
 
@@ -376,6 +380,46 @@ Every module returns `Result<T, Error>`. Every `Error` carries:
 
 ---
 
+## 16. GENESIS — codes 1400-1499
+
+| Code | Name | Sev | Ret | Rec | Description |
+|---|---|---|---|---|---|
+| 1400 | GENESIS_FAILED | E | N | M | Generic genesis failure |
+| 1401 | INVALID_MANIFEST | E | N | M | Genesis manifest validation failed |
+| 1402 | SLOT_EXHAUSTED | E | N | M | All bootstrap slots have been claimed |
+| 1403 | SLOT_EXPIRED | W | N | M | Bootstrap slot has expired |
+| 1404 | RECOVERY_PACKAGE_INVALID | C | N | M | Recovery package signature or integrity check failed |
+| 1405 | ROOT_SESSION_EXPIRED | W | N | M | Root session token has expired |
+| 1406 | ROOT_SESSION_INVALID | E | N | M | Root session verification failed |
+| 1407 | BOOTSTRAP_IN_PROGRESS | I | N | G | Bootstrap is already in progress |
+| 1408 | MANIFEST_VERSION_MISMATCH | E | N | M | Genesis manifest version does not match expected |
+| 1409 | WIZARD_VERSION_MISMATCH | W | N | M | Wizard version mismatch, may need upgrade |
+
+---
+
+## 17. RECOVERY — codes 1500-1599
+
+
+| Code | Name | Sev | Ret | Rec | Description |
+|---|---|---|---|---|---|
+| 1500 | RECOVERY_NOT_NEEDED | I | N | N | Mesh has sufficient quorum; no recovery required |
+| 1501 | RECOVERY_SESSION_EXPIRED | W | N | M | Recovery session has expired; start a new one |
+| 1502 | RECOVERY_SESSION_INVALID | E | N | M | Recovery session verification failed |
+| 1503 | RECOVERY_PASSPHRASE_MISMATCH | E | N | M | Recovery package passphrase is incorrect |
+| 1504 | RECOVERY_QUORUM_STILL_PRESENT | W | N | N | Cannot force recovery; quorum still exists |
+| 1505 | RECOVERY_EPOCH_ROLLBACK | C | N | M | New epoch is less than current epoch; rollback not allowed |
+
+## 18. BOOTSTRAP — codes 1700-1799
+
+| Code | Name | Sev | Ret | Rec | Description |
+|---|---|---|---|---|---|---|
+| 1700 | BOOTSTRAP_PROTOCOL_ERROR | E | N | N | Bootstrap protocol error |
+| 1701 | BOOTSTRAP_SNAPSHOT_UNAVAILABLE | E | N | N | Snapshot not ready (mesh still in genesis) |
+| 1702 | BOOTSTRAP_NONCE_MISMATCH | E | N | N | Response nonce does not match request |
+| 1703 | BOOTSTRAP_NOT_AUTHORIZED | E | N | N | Node not authorized for bootstrap |
+
+---
+
 ## Error Code Ranges by Category
 
 | Category | Range | Count |
@@ -388,11 +432,15 @@ Every module returns `Result<T, Error>`. Every `Error` carries:
 | Session | 500 — 599 | 12 |
 | Protocol | 600 — 699 | 24 |
 | Runtime | 700 — 799 | 19 |
-| Governance | 800 — 899 | 12 |
+| Governance | 800 — 899 | 14 |
 | Storage | 900 — 999 | 14 |
 | Internal | 1000 — 1099 | 10 |
 | Compiler | 1100 — 1199 | 8 |
 | Trust | 1200 — 1299 | 9 |
-| **Total** | | **190** |
+| Contract | 1300 — 1399 | 0 |
+| Genesis | 1400 — 1499 | 10 |
+| Recovery | 1500 — 1599 | 6 |
+| Bootstrap | 1700 — 1799 | 4 |
+| **Total** | | **212** |
 
 Each category has room for expansion (up to code 1023 per category).

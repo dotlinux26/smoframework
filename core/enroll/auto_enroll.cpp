@@ -324,7 +324,8 @@ Result<void> run_join_command(const std::string& token_str,
     std::printf("\n✓ Successfully enrolled!\n");
     std::printf("  Node ID:      %s\n", node_id_hex.c_str());
     std::printf("  Mesh:         %s\n", token.mesh_id.c_str());
-    std::printf("  Role:         %s\n", token.role.c_str());
+    std::printf("  Role:         %s\n", token.admission.role.c_str());
+    std::printf("  Profile:      %s\n", token.admission.profile.empty() ? "default" : token.admission.profile.c_str());
     std::printf("  Certificate:  %s\n", cert_path.c_str());
     std::printf("  Fingerprint:  %s\n", fingerprint.c_str());
 
@@ -339,7 +340,8 @@ Result<void> run_join_command(const std::string& token_str,
         if (f) {
             f << "{\n";
             f << "  \"mesh_id\": \"" << token.mesh_id << "\",\n";
-            f << "  \"role\": \"" << token.role << "\",\n";
+            f << "  \"role\": \"" << token.admission.role << "\",\n";
+            f << "  \"profile\": \"" << (token.admission.profile.empty() ? "server" : token.admission.profile) << "\",\n";
             f << "  \"listen_port\": " << port << ",\n";
             f << "  \"bootstrap_endpoints\": [\n";
             for (size_t i = 0; i < token.bootstrap_endpoints.size(); ++i) {

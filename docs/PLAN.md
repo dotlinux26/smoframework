@@ -1,554 +1,303 @@
-# Sprint 3 — Contract Runtime Layer
+# Phase 1 — PKI & Governance (Discussion 35) — ✅ COMPLETE
 
-## Final Plan (Locked)
+**Agreed between @dotlinux26 and @D-O-T-Solutions on 2026-07-17.**  
+**Implementation completed: 2026-07-17.**
 
-Agreed between @dotlinux26 and @D-O-T-Solutions on 2026-07-16.
-
----
-
-## Sprint 3.1 — Stabilization (2026-07-16)
-
-### Scope
-Fix E2E test failures, implement CSR signing, stabilize CLI, create `core/network/` skeleton.
-
-### Completed
-
-| Task | Status |
-|------|--------|
-| Fix `smo-admin sign` — placeholder → real CSR signing | ✅ |
-| Fix CLI `--dry-run` without `--opcode` | ✅ |
-| Fix E2E test expected strings (scope, session, selection) | ✅ |
-| Create `core/network/` skeleton (tcp, udp, bootstrap, transport) | ✅ |
-| Update docs (PLAN.md, ARCHITECTURE.md) | ✅ |
-
-### Issues Fixed
-
-| # | Issue | Root Cause | Fix |
-|---|-------|-----------|-----|
-| 1 | `smo-admin sign` no-op | `cmd/smo-admin/main.cpp` was `return 0` placeholder | Implemented JSON CSR reader + certificate writer |
-| 2 | `smo exec --dry-run` requires `--opcode` | `cmd/smo-cli/main.cpp` L250 hard error | Allow `--dry-run` without opcode → selection-only mode |
-| 3 | Step 9 expected "session" | Output is "Session opened" | Updated expected string |
-| 4 | Step 10 scope test | Ping didn't include scope in output | Added scope field to ping JSON response |
-| 5 | Docker port conflict | Port 7777 used by other services | Changed node-a host port to 27777 |
-| 6 | blake3 SSE2 on ARM | Unconditional SSE/AVX sources | Conditional compilation per arch |
-
-### Remaining (Sprint 4)
-
-- `core/network/` implementation (TCP/UDP transport, bootstrap, heartbeat)
-- NAT traversal (STUN/ICE/TURN)
-- SWIM-inspired gossip membership
-- Real peer table (not local-only discovery)
+**Spec frozen:** [RFC 0033 — Mesh Genesis & Governance](../RFC/0033-mesh-genesis-governance.md)
 
 ---
 
-## Sprint 4 — Network Layer (2026-07-16)
+## Sprint 35A — Root Session & Genesis ✅
 
-### Completed
+**Mục tiêu:** Root từ ephemeral key → **Node** với role=ROOT, có store, API, FSM.  
+Sinh Genesis Manifest + Recovery Package + Bootstrap Slots.
 
-| Task | Status |
-|------|--------|
-| 4.1 PeerStore (SQLite) — persistent peer cache | ✅ |
-| 4.2 Bootstrap integration — real seed connect | ✅ |
-| 4.3 UDP Transport + HeartbeatService | ✅ |
-| 4.4 MembershipSync — typed event bus | ✅ |
-| 4.5 GossipEngine — SWIM epidemic membership | ✅ |
-| 4.6 CLI + Selector wiring — `exec`/`select` via Selector | ✅ |
+### Files tạo
+- `core/genesis/genesis_manifest.hpp/.cpp` — GenesisManifest, DeploymentProfile, AuthorityRange, QuorumConfig, profile defaults, JSON serialization
+- `core/genesis/bootstrap_slot.hpp/.cpp` — BootstrapSlot, SlotStatus, SlotRing (claim/fulfill/expire/revoke)
+- `core/genesis/recovery_package.hpp/.cpp` — RecoveryPackage, EmergencyRecoveryToken
+- `core/genesis/root_session.hpp/.cpp` — RootSession, RootSessionManager (start/validate/consume/expire)
+- `core/genesis/genesis.hpp/.cpp` — GenesisWizard, GenesisStage, 2-stage flow (Stage 0 + Stage 1)
+- `core/genesis/CMakeLists.txt` — Build target `smo_genesis`
+- `core/mesh/mesh_state.hpp` — MeshState enum + transition validation
+- `core/mesh/mesh_fsm.hpp/.cpp` — MeshFsm wrapper (12 transition rules + 5 timeouts)
 
-### Sprint 4 Summary
-
-| Component | Files | Purpose |
-|-----------|-------|---------|
-| PeerStore | `core/discovery/peer_store.{hpp,cpp}` | SQLite persistent peer cache, filtered queries, event log |
-| Bootstrap | `core/discovery/discovery.cpp::Bootstrap::find_seed` | HELLO/WELCOME/DISCOVER/NODE_INFO handshake |
-| UDP Transport | `core/network/udp/udp_transport.{hpp,cpp}` | Connectionless UDP sessions, listener, connect |
-| HeartbeatService | `core/network/udp/heartbeat_service.{hpp,cpp}` | PING/PONG, RTT, HealthMonitor integration |
-| MembershipSync | `core/network/sync/membership_sync.{hpp,cpp}` | Typed event bus: PeerAdded/Removed/Updated/Renamed |
-| GossipEngine | `core/discovery/gossip.{hpp,cpp}` | SWIM epidemic membership sync, fanout |
-| CLI Selector | `cmd/smo-cli/main.cpp::cmd_exec` | `exec --name/--role/--where --dry-run` → Selector → NodeSet |
-| Daemon | `cmd/smo-node/main.cpp` | Bootstrap + MembershipTable + DiscoveryEngine + Heartbeat + Gossip |
-
-### Architecture Update
-
-Network Layer inserted between Connectivity and Session:
-```
-CONNECTIVITY (STUN/ICE) → NETWORK (Bootstrap/Sync/Heartbeat/Gossip/PeerStore)
-                                          ↓
-                              MembershipTable + PeerRecord
-                                          ↓
-                              Selector → NodeSet → Runtime Dispatch
-```
+### Files sửa
+- `core/errors/error.hpp` — +ErrorCategory::Genesis (15) + SMO_ERR_GENESIS macro
+- `core/errors/error_codes.md` — +10 GENESIS error codes (1400-1409)
+- `core/CMakeLists.txt` — +add_subdirectory(genesis)
+- `core/mesh/CMakeLists.txt` — +mesh_fsm.cpp
 
 ---
 
-### Phase 5 — Discovery (Completion)
+## Sprint 35B — Authority as Node (Role-based) ✅
 
-| Task | File |
-|------|------|
-| handle_ping/handle_pong from no-op → real response | core/discovery/discovery.cpp |
-| Gossip piggyback membership | core/discovery/gossip.hpp/.cpp (done) |
-| Seed priority fallback | core/discovery/discovery.cpp |
+**Mục tiêu:** Authority → **Role** gắn với node, bootstrap qua Slot.
 
----
-
-### Phase 6 — Tests
-
-| Test | Scope |
-|------|-------|
-| Parser round-trip | JSON → AST → JSON |
-| SMIR lowering | AST → SMIR correctness |
-| Semantic Validator | ABI hash mismatch, missing capability |
-| Planner | Node selection logic |
-| Builder → DAG | DAG structure, dependency edges |
-| Final Validator | Cycle rejection, max depth overflow |
-| Compiler integration | Intent → DAG (full pipeline) |
-| Executor dispatch | Kernel contracts via Runtime::execute() |
-| Discovery | Ping/pong, gossip propagation |
-| Bootstrap integration | Seed connect → peer table |
-| Heartbeat + RTT | PING/PONG → RTT update |
-| Gossip propagation | Event fanout → remote membership update |
-| Selector dry-run | `smo exec --name X --dry-run` → NodeSet |
+### Files sửa
+- `core/certificate/certificate.hpp` — +Recovery (6), deprecate Reader→Member, role_deprecate_reader(), Role_Max
+- `core/authority/authority.hpp` — create_mesh_keys [[deprecated]], +BootstrapSignRequest + sign_bootstrap_csr()
+- `cmd/smo-cli/intent_parser.hpp` — +IntentType::Genesis
+- `cmd/smo-cli/intent_parser.cpp` — +genesis command
+- `cmd/smo-cli/main.cpp` — +handle_genesis() (create/status/manifest), +genesis auto-complete
+- `cmd/smo-cli/CMakeLists.txt` — +smo_genesis link
+- `cmd/smo-admin/main.cpp` — +deprecation warning trong cmd_create_mesh()
 
 ---
 
-### Phase 7 — Network Layer Hardening (Post-Sprint 4)
+## Sprint 35C — Governance Engine (Level A + Level B) ✅
 
-| Task | Scope |
-|------|-------|
-| STUN client (RFC 8489) | `transport/stun/` |
-| ICE candidate gathering (RFC 8445) | `transport/ice/` |
-| UDP hole punch (NAT traversal) | `transport/nat/` |
-| TURN relay (RFC 8656) | `transport/relay/` |
-| PeerStore vacuum/retention | GC old peer_events |
-| Gossip compression | Delta sync for large meshes |
+**Mục tiêu:** GovernanceEngine → phân tách Membership vs Constitution.
 
----
-
-### Phase 8 — NAT Traversal (Tier 2)
-
-| Task | Scope |
-|------|-------|
-| STUN client implementation | `transport/stun/client.cpp` |
-| ICE candidate gathering | `transport/ice/gatherer.cpp` |
-| UDP hole punch | `transport/nat/punch.cpp` |
-| TURN relay | `transport/relay/turn.cpp` |
+### Files sửa
+- `core/governance/governance.hpp` — +GovernanceTier (Membership/Constitution/Unanimous), +GovernanceAction (16 actions), +action_to_tier(), +default_quorum(), +MeshHealth + compute_health(), +ProposalState::Conflicted, +tier field, +error codes 812-813
+- `core/governance/governance.cpp` — +default_quorum(), action_to_tier(), MeshHealth::to_display(), engine auto-assign tier+TTL
+- `core/errors/error_codes.md` — +812 PROPOSAL_CONFLICT, 813 ACTION_NOT_ALLOWED
+- `cmd/smo-cli/intent_parser.hpp/.cpp` — +Governance IntentType + command
+- `cmd/smo-cli/main.cpp` — +handle_governance() (propose/list/status), +mesh health, +governance auto-complete
 
 ---
 
-### Phase 9 — Mesh Governance & Recovery
+## Sprint 35D — Recovery & Revocation ✅
 
-| Task | Scope |
-|------|-------|
-| Mesh manifest signing | `cmd/smo-admin` |
-| Authority rotation | `smo mesh authority add/revoke` |
-| Epoch increment | `smo mesh epoch increment` |
-| Recovery package | `smo mesh recover` |
+**Mục tiêu:** Soft Recovery, Hard Recovery, Revocation pipeline.
 
----
+### Files tạo
+- `core/recovery/recovery_engine.hpp/.cpp` — RecoveryEngine, RecoverySession, RecoveryMode (Soft/Hard), assess_mode(), start_soft/hard(), add_signature(), execute(), cancel()
+- `core/recovery/crl.hpp` — CRL, CRLEntry, RevokeCertMsg, RevokeAckMsg
+- `core/recovery/CMakeLists.txt` — Build integration
 
-### Changes from Original Plan
-
-| Old Plan | Final Plan |
-|----------|-----------|
-| 4 RFCs (0025-0028) | 2 RFCs (0025-0026) |
-| JSON → Parser → DAG | JSON → AST → SMIR → Planner → DAG |
-| Validator 1 pass | Validator 2 passes (Semantic + Final) |
-| Kernel contracts Sprint 4 | Kernel contracts Sprint 3 |
-| No Contract ABI | Contract ABI + ABI Hash is first-class |
-| No Runtime::execute() | Single `Runtime::execute(ContractID, ExecutionContext)` |
-| Kernel may hardcode opcodes | **Polymorphic registration, zero hardcode** |
-| Discovery MVP only | **Full Network Layer (Bootstrap/Sync/Heartbeat/Gossip/PeerStore)** |
-| Single-node framework | **Distributed mesh runtime with Selection Engine** |
+### Files sửa
+- `core/errors/error.hpp` — +ErrorCategory::Recovery (16) + SMO_ERR_RECOVERY
+- `core/errors/error_codes.md` — +Recovery codes 1500-1505
+- `core/CMakeLists.txt` — +add_subdirectory(recovery)
+- `core/opcode/opcode.h` — +4 opcodes REVOKE_CERT/EPOCH_INCREMENT/RECOVERY_SESSION/CRL_SYNC
+- `cmd/smo-cli/intent_parser.hpp/.cpp` — +Recovery IntentType + command
+- `cmd/smo-cli/main.cpp` — +handle_recovery() (restore/force/status), +recovery auto-complete
 
 ---
 
-### Key Interfaces
+## Sprint 35 Summary
 
-```cpp
-// The single runtime entry point
-ExecutionResult Runtime::execute(const ContractID&, const ExecutionContext&);
+| Metric | Count |
+|--------|-------|
+| Files created | 15 source files + 2 standalone headers |
+| Files modified | 18 files |
+| New error codes | 18 (Genesis 10 + Governance 2 + Recovery 6) |
+| New error categories | 2 (Genesis + Recovery) |
+| New opcodes | 4 |
+| Build targets | smo_genesis (static lib) |
+| RFC spec | RFC 0033 — Mesh Genesis & Governance |
 
-// Contract ABI
-struct ContractABI {
-    uint32_t abi_version;
-    Schema input_schema;
-    Schema output_schema;
-    CapabilityMask capability_mask;
-    std::vector<OpcodeID> opcode_dependencies;
-    Hash256 abi_hash;       // BLAKE3(canonical_abi_json)
-    Hash256 semantic_hash;  // BLAKE3(abi_hash + contract_json)
-    Version min_runtime_version;
-    Version max_runtime_version;
-};
+## Next: Sprint 36 — Role Model & Join Token
 
-// Compiler pipeline
-struct Compiler {
-    Result<ExecutionGraph> compile(const Intent&, const ContractDefinition&);
-};
-
-// Executor (ignorant of contract category)
-struct Executor {
-    Result<ExecutionResult> execute(const ExecutionGraph&, const Session&);
-};
-
-// Selection Engine
-namespace smo::select {
-    Result<NodeSet> select(const MembershipTable&, const SelectQuery&);
-}
-
-// PeerStore
-class PeerStore {
-    Result<void> open(std::string_view path);
-    Result<void> upsert(const PeerRecord&);
-    Result<PeerRecord> lookup(const NodeID&);
-    Result<PeerRecord> lookup_by_name(std::string_view);
-    Result<std::vector<PeerRecord>> peers_by_role(Role);
-    Result<std::vector<PeerRecord>> peers_by_tag(std::string_view);
-    Result<void> sync_from_membership(const MembershipTable&);
-    Result<void> sync_to_membership(MembershipTable&) const;
-};
-```
+Reference: [DISCUSSION_0036_JOIN_TOKEN_BOOTSTRAP.md](discussions/DISCUSSION_0036_JOIN_TOKEN_BOOTSTRAP.md)
 
 ---
 
-### Phase 1 — RFCs
+# Phase 2 — Bootstrap & Role Model (Discussion 36)
 
-| RFC | Title | Content |
-|-----|-------|---------|
-| RFC 0025 | Contract Runtime Architecture | Compiler pipeline (6-stage + SMIR), Executor interface, 3-tier contract (Kernel/Native/Mesh), Runtime::execute() is the single interface |
-| RFC 0026 | Contract ABI Specification | ABI format (Input Schema, Output Schema, Capability Mask, Opcode Dependencies, Min/Max Runtime Version), ABI Hash (BLAKE3), Semantic Hash, ContractID → ABI Hash → DAG Hash linkage |
+**Architecture frozen:** 2026-07-18.
 
----
-
-### Phase 2 — Compiler Pipeline
-
-```
-JSON Contract / DSL / YAML / AI-gen
-          ↓
-     ┌──────────┐
-     │  Parser   │  Parse ContractDefinition → AST
-     └──────────┘
-          ↓
-     ┌──────────┐
-     │    AST    │  Contract AST (opcodes, params, edges, conditions)
-     └──────────┘
-          ↓
-     ┌──────────┐
-     │   SMIR    │  SMO Intermediate Representation — canonical IR
-     └──────────┘
-          ↓
-     ┌──────────┐
-     │ Semantic  │  ABI Hash match, capability req, opcode dep check
-     │ Validator │  (Pass 1)
-     └──────────┘
-          ↓
-     ┌──────────┐
-     │  Planner  │  Target node selection, shard mapping
-     └──────────┘
-          ↓
-     ┌──────────┐
-     │  Builder  │  SMIR → ExecutionGraph (DAG)
-     └──────────┘
-          ↓
-     ┌──────────┐
-     │ Optimizer │  Prune nodes, merge reads, constant folding
-     └──────────┘
-          ↓
-     ┌──────────┐
-     │  Final    │  Acyclic, max depth, node reachability
-     │ Validator │  (Pass 2)
-     └──────────┘
-          ↓
-     ExecutionGraph (DAG)
-```
-
-**New files:**
-
-| File | Content |
-|------|---------|
-| `compiler/ast/ast.hpp` | Contract AST node types |
-| `compiler/ast/ast.cpp` | AST builder from ParsedIntent |
-| `compiler/smir/smir.hpp` | SMIR opcodes, operands, basic blocks |
-| `compiler/smir/smir.cpp` | AST → SMIR lowering |
-| `compiler/parser/parser.hpp/.cpp` | JSON → AST (real implementation) |
-| `compiler/validator/semantic.hpp/.cpp` | Pass 1: Semantic validation |
-| `compiler/validator/final.hpp/.cpp` | Pass 2: DAG structural validation |
-| `compiler/planner/planner.hpp/.cpp` | Target selection |
-| `compiler/graph/builder.hpp/.cpp` | SMIR → ExecutionGraph |
-| `compiler/optimizer/optimizer.hpp/.cpp` | DAG optimization passes |
-| `compiler/compiler.cpp` | Concrete Compiler |
+**Spec:** [RFC 0034 — Bootstrap Protocol](../RFC/0034-bootstrap-protocol.md)  
+**Discussion:** [DISCUSSION_0036_JOIN_TOKEN_BOOTSTRAP.md](discussions/DISCUSSION_0036_JOIN_TOKEN_BOOTSTRAP.md)
 
 ---
 
-### Phase 3 — Executor & Runtime
+## Sprint 36A — Bootstrap Protocol ✅
 
-| File | Content |
-|------|---------|
-| `runtime/executor/executor.hpp/.cpp` | resolve(ContractID) → DAG (cache hit) → execute(DAG, Session) |
-| `runtime/sandbox/sandbox.hpp/.cpp` | Seccomp/namespace isolation per task node |
-| `runtime/workerpool/workerpool.hpp/.cpp` | Thread pool, parallel task dispatch |
-| `runtime/runtime.hpp/.cpp` | `ExecutionResult execute(const ContractID&, const ExecutionContext&)` |
+**Mục tiêu:** Replace HTTP BootstrapService with opcode-based Bootstrap Protocol over TCP Transport. Wire CBOR encoding. PacketDispatcher.
 
-**Principle:** Runtime does NOT know opcodes. No `if(op == PING)`.
+### Files tạo
+- `RFC/0034-bootstrap-protocol.md` — Bootstrap Protocol spec
+- `core/bootstrap/cbor.hpp/.cpp` — Minimal CBOR encoder/decoder (~200 LOC)
+- `core/bootstrap/bootstrap_snapshot.hpp/.cpp` — CBOR-serialized BootstrapSnapshot
+- `core/bootstrap/bootstrap_protocol.hpp/.cpp` — BootstrapRequest/Response, `handle_bootstrap_request()`, `register_bootstrap_handler()`
+- `core/network/packet_dispatcher.hpp/.cpp` — PacketDispatcher routing by opcode_id
 
----
+### Files xóa
+- `core/bootstrap/bootstrap_service.hpp/.cpp` — HTTP BootstrapService removed
 
-### Phase 4 — Kernel Contracts
-
-Registered polymorphically:
-
-```cpp
-registry.register_kernel("ping",             KernelPingContract{});
-registry.register_kernel("whoami",           KernelWhoamiContract{});
-registry.register_kernel("session_open",     KernelSessionOpenContract{});
-registry.register_kernel("session_close",    KernelSessionCloseContract{});
-registry.register_kernel("discover",         KernelDiscoverContract{});
-registry.register_kernel("node.info",        KernelNodeInfoContract{});
-registry.register_kernel("identity.rotate",  KernelIdentityRotateContract{});
-```
-
-All implement `Contract` interface. Executor calls `contract->execute()`, unaware of category.
+### Files sửa
+- `core/mesh/mesh_manager.hpp/.cpp` — Moved from `smo_mesh` to `smo_core` (fix circular dep)
+- `core/errors/error.hpp` — +ErrorCategory::Bootstrap (17)
+- `core/errors/error_codes.md` — +Bootstrap codes 1700-1703
+- `cmd/smo-node/main.cpp` — Wired PacketDispatcher + Bootstrap handler (skeleton)
 
 ---
 
-### Phase 5 — Discovery (Completion)
+## Sprint 36B — Signature Join Token & Root Redesign ✅
 
-| Task | File |
-|------|------|
-| handle_ping/handle_pong from no-op → real response | core/discovery/discovery.cpp |
-| Gossip piggyback membership | core/discovery/gossip.hpp/.cpp (new) |
-| Seed priority fallback | core/discovery/discovery.cpp |
+**Mục tiêu:** Join Token chuyển từ HMAC sang chữ ký số. RootSession trở thành session-centric thay vì key-centric. SignerContext abstract class cho TPM/HSM/YubiKey.
+
+### Kiến trúc chốt
+
+```
+Recovery Package
+    ↓ passphrase + HashImpl + AeadImpl + SignerImpl
+ unlock()
+    ↓
+ SoftwareSignerContext   ← hoặc TPM/HSM/YubiKey
+    ↓
+ RootSession { SessionPolicy, AuditSink }
+    ↓
+ execute(RootRequest{op, payload, reason})
+    ↓ Policy → SignerContext → AuditSink → RootResult
+    ↓
+ destroy() → zeroize + invalidate handle + audit
+```
+
+### Files tạo
+- `core/crypto/signer_context.hpp` — SignerContext abstract class + SoftwareSignerContext + SignerMetadata
+
+### Files sửa
+- `core/genesis/root_session.hpp/.cpp` — SignerContext (unique_ptr) thay vì raw key; execute() thay vì sign(); SessionPolicy; AuditSink; AuditEvent; destroy() invalidates handle
+- `core/genesis/recovery_package.hpp/.cpp` — unlock() tạo SoftwareSignerContext, +version verify
+- `core/genesis/genesis.hpp/.cpp` — run_stage_0 nhận unique_ptr<SignerContext>
+- `core/enroll/join_token.hpp/.cpp` — validate_token() giờ verify signature qua SignerImpl
+- `cmd/smo-cli/main.cpp` — Placeholder SignerContext
+- `cmd/smo-admin/main.cpp` — generate-invite dùng RecoveryPackage → RootSession → execute(SignJoinToken)
+
+### Open
+- `cmd/smo-admin generate-invite` — ✅ Done (signature-based)
 
 ---
 
-### Phase 6 — Tests
+## Sprint 36C — Runtime Foundation ✅ COMPLETE
 
-| Test | Scope |
-|------|-------|
-| Parser round-trip | JSON → AST → JSON |
-| SMIR lowering | AST → SMIR correctness |
-| Semantic Validator | ABI hash mismatch, missing capability |
-| Planner | Node selection logic |
-| Builder → DAG | DAG structure, dependency edges |
-| Final Validator | Cycle rejection, max depth overflow |
-| Compiler integration | Intent → DAG (full pipeline) |
-| Executor dispatch | Kernel contracts via Runtime::execute() |
-| Discovery | Ping/pong, gossip propagation |
+**Mục tiêu:** EventBus → RuntimeKernel → Dispatcher → ContractInterface → OutputManager → RuntimeContext.
 
----
-
-### Changes from Original Plan
-
-| Old Plan | Final Plan |
-|----------|-----------|
-| 4 RFCs (0025-0028) | 2 RFCs (0025-0026) |
-| JSON → Parser → DAG | JSON → AST → SMIR → Planner → DAG |
-| Validator 1 pass | Validator 2 passes (Semantic + Final) |
-| Kernel contracts Sprint 4 | Kernel contracts Sprint 3 |
-| No Contract ABI | Contract ABI + ABI Hash is first-class |
-| No Runtime::execute() | Single `Runtime::execute(ContractID, ExecutionContext)` |
-| Kernel may hardcode opcodes | **Polymorphic registration, zero hardcode** |
+### Files created
+- `core/runtime/event_bus.hpp/.cpp` — Pub/Sub backbone
+- `core/runtime/runtime_kernel.hpp/.cpp` — Pipeline: Validate→Resolve→Middleware→Plan→Dispatch→Collect→Aggregate→Audit→Return
+- `core/runtime/dispatcher.hpp/.cpp` — Contract-agnostic dispatcher
+- `core/runtime/contract_interface.hpp` — ContractInterface abstract + NativeContract base
+- `core/runtime/output_manager.hpp/.cpp` — Aggregator (summary → drill-down)
+- `core/runtime/runtime_context.hpp` — Per-execution context (deduplicated, ExecutionPlan as inner Plan)
+- `core/runtime/runtime_types.hpp` — Single source of truth for all runtime types
+- `core/runtime/CMakeLists.txt` — Build target `smo_runtime`
 
 ---
 
-### Key Interfaces
+## Sprint 36C.5 — Execution Model ✅ COMPLETE
 
-```cpp
-// The single runtime entry point
-ExecutionResult Runtime::execute(const ContractID&, const ExecutionContext&);
+**Mục tiêu:** Execution Plan = IR of Runtime. Mọi request đều qua ExecutionPlan (DAG). Middleware 4 stages. PlanResolver/PlanExecutor tách biệt.
 
-// Contract ABI
-struct ContractABI {
-    uint32_t abi_version;
-    Schema input_schema;
-    Schema output_schema;
-    CapabilityMask capability_mask;
-    std::vector<OpcodeID> opcode_dependencies;
-    Hash256 abi_hash;       // BLAKE3(canonical_abi_json)
-    Hash256 semantic_hash;  // BLAKE3(abi_hash + contract_json)
-    Version min_runtime_version;
-    Version max_runtime_version;
-};
+### Files created
+- `core/runtime/runtime_types.hpp` — RuntimeRequest/Result, ExecutionPlan/DAG, Step, RuntimeError, ContextValue, NextAction, PlanContext, ExecutionMiddleware, PlanResolver
+- `core/runtime/plan_executor.hpp/.cpp` — DAG executor with parallel support, compensation, rollback
+- `core/runtime/middleware.hpp/.cpp` — 4-stage middleware pipeline + 6 built-in middlewares (Auth, Policy, Tracing, Timeout, Metrics, Audit)
+- `core/runtime/dispatcher.hpp/.cpp` — Minimal contract-agnostic Dispatcher
 
-// Compiler pipeline
-struct Compiler {
-    Result<ExecutionGraph> compile(const Intent&, const ContractDefinition&);
-};
-
-// Executor (ignorant of contract category)
-struct Executor {
-    Result<ExecutionResult> execute(const ExecutionGraph&, const Session&);
-};
-```
+### Key decisions executed
+- **Single Source of Truth:** `runtime_types.hpp` — all duplicates removed
+- **RuntimeContext::Plan = ExecutionPlan** — no type conversion needed
+- **RuntimeError → Error** via `operator Error()` for Result<T> compatibility
+- **SMO_TRY macro** for pipeline (Result's operator= is deleted)
+- **Scheduler excluded** from runtime build (not yet needed)
 
 ---
 
-## Sprint 5C — Bootstrap & Publish (2026-07-17)
+## Sprint 36C.6 — Runtime API Freeze (NEXT)
 
-### Problem
-Mesh creation is currently offline — `smo-admin create-mesh` generates keys and `mesh.json` but no network configuration. The first Authority node has no declared endpoint, so Join Tokens cannot carry bootstrap addresses and new nodes cannot discover where to connect.
+**Mục tiêu:** Freeze Contract ABI, Runtime Services, State Machine, NextAction, and Lifecycle before any Native Contract is built.
 
-### Design
-Two new concepts: **Listen Address** (what the daemon binds to) and **Advertise Address** (what peers connect to). Mesh is not considered "online" until `bootstrap` is configured. Join Tokens read `bootstrap_endpoints[]` from `mesh.json`.
+### RFCs (all APPROVED)
 
-### Tasks
+| RFC | Title | Status |
+|-----|-------|--------|
+| 0036 | Contract ABI Freeze | ✅ APPROVED — ContextValue arguments, partial-const RuntimeContext, strong metrics |
+| 0037 | Runtime Service Injection | ✅ APPROVED — ClockService + RandomService, no reinterpret_cast |
+| 0038 | Execution State Machine | ✅ APPROVED — 12-state + Compensating, no TimedOut terminal |
+| 0039 | NextAction Model | ✅ APPROVED — ActionDispatchContract/Message, no ActionComplete |
+| 0040 | Contract Lifecycle + Metadata + Capabilities | ✅ APPROVED — Registry/Manager split, no Executing lifecycle |
 
-| # | Task | File |
-|---|------|------|
-| 1 | Add `bootstrap_endpoints: vector<string>` and `advertise_addresses: vector<string>` to `MeshConfig` | `core/mesh/mesh_manager.hpp` |
-| 2 | Add `listen_address: string` (default `0.0.0.0:7777`) to `MeshConfig` | `core/mesh/mesh_manager.hpp` |
-| 3 | Serialize/deserialize new fields in `mesh.json` | `core/mesh/mesh_manager.cpp` |
-| 4 | Implement `smo-admin mesh publish` interactive wizard | `cmd/smo-admin/main.cpp` |
-| 5 | Implement `smo-admin bootstrap configure` interactive wizard (alias for publish) | `cmd/smo-admin/main.cpp` |
-| 6 | Auto-detect local interfaces (loopback, private, public) | `core/network/interface.hpp/.cpp` |
-| 7 | Auto-detect public IP via STUN or UDP echo | `core/network/public_ip.hpp/.cpp` |
-| 8 | Port availability verification (`bind()` probe) | `core/network/port_check.hpp/.cpp` |
-| 9 | DNS resolution support (prefer DNS over IP when available) | `core/network/dns.hpp/.cpp` |
-| 10 | Cloud firewall reminder (AWS, Azure, GCP, OCI, UFW, iptables) | `cmd/smo-admin/main.cpp` |
-| 11 | NAT detection (private vs public mismatch) | `core/network/nat_detect.hpp/.cpp` |
-| 12 | Update `generate-invite` to read `bootstrap_endpoints` from `mesh.json` instead of requiring `--endpoint` | `cmd/smo-admin/main.cpp` |
-| 13 | Daemon reads `listen_address` from mesh config on startup | `cmd/smo-node/main.cpp` |
-| 14 | Daemon startup summary shows listening + advertised addresses | `cmd/smo-node/main.cpp` |
-| 15 | New error codes: 223 (BOOTSTRAP_NOT_CONFIGURED), 224 (PORT_UNAVAILABLE), 225 (NO_PUBLIC_IP_DETECTED) | `core/errors/error_codes.md` |
-
-### Wizard Flow (`smo-admin mesh publish`)
-
-```
-$ smo-admin --mesh production mesh publish
-
-Mesh: production
-
-Step 1: Listen Address
-  Bind address [0.0.0.0:7777]:
-  → 0.0.0.0:7777
-
-Step 2: Port Check
-  Checking port 7777...
-  ✓ Port 7777 is available
-
-Step 3: Advertise Address
-  Detected interfaces:
-    1) 127.0.0.1          (loopback)
-    2) 192.168.1.5        (private)
-    3) 203.113.x.x        (public) ← auto-detected
-
-  Choose advertise address [3]:
-  → 3
-
-  Or enter custom (e.g. authority.company.com):
-  → authority.company.com:7777
-
-Step 4: NAT Notice
-  ⚠ Private: 192.168.1.5
-  ⚠ Public:  203.113.x.x
-  ⚠ NAT detected — ensure port 7777 is forwarded.
-
-Step 5: Cloud Firewall
-  ┌─────────────────────────────────────────────┐
-  │ Remember to open TCP port 7777 on your      │
-  │ cloud firewall:                              │
-  │                                             │
-  │   AWS Security Group → Inbound → Custom TCP │
-  │   Azure NSG         → Inbound → 7777        │
-  │   GCP Firewall      → Ingress → tcp:7777    │
-  │   OCI Security List → Ingress → 7777         │
-  │   UFW:  sudo ufw allow 7777/tcp             │
-  │   iptables: sudo iptables -A INPUT -p tcp   │
-  │            --dport 7777 -j ACCEPT           │
-  └─────────────────────────────────────────────┘
-
-Step 6: Confirm
-  Listen:     0.0.0.0:7777
-  Advertise:  authority.company.com:7777
-              tcp://203.113.x.x:7777
-  Bootstrap:  YES
-
-  Publish? [Y/n]:
-  → y
-
-  ✓ Mesh 'production' is now online.
-```
-
-### Listen vs Advertise
-
-```
-┌──────────────────┐     ┌───────────────────┐
-│  smo-node        │     │  Peer connects to  │
-│  Listen:         │     │  Advertise address │
-│  0.0.0.0:7777   │◄────│  authority.smo:7777│
-│  (all interfaces)│     │                    │
-└──────────────────┘     └───────────────────┘
-```
-
-| Concept | Meaning | Example |
-|---------|---------|---------|
-| `listen_address` | What the OS socket binds to | `0.0.0.0:7777` or `10.0.0.1:7777` |
-| `advertise_addresses` | What peers see in the mesh | `authority.company.com:7777`, `203.113.x.x:7777` |
-
-### Bootstrap Endpoints in Join Token
-
-After publish, `generate-invite` reads `bootstrap_endpoints` directly from `mesh.json`:
-
-```
-$ smo-admin --mesh production generate-invite Worker --expire 30m
-```
-
-Token CBOR contains:
-```
-bootstrap_endpoints: [
-    "authority.company.com:7777",
-    "203.113.x.x:7777"
-]
-```
-
-New node joins:
-```
-$ smo mesh join SMO-JOIN-<base64url(...)>
-  → Decodes token
-  → Connects to bootstrap_endpoints[0]
-  → Sends CSR
-  → Receives certificate
-  → Ready.
-```
-
-### Daemon Bootstrap
-
-On `smo-node --daemon`:
-1. Read `mesh.json` (if Authority) or use config
-2. Bind `listen_address`
-3. Verify port is actually listening
-4. Start heartbeat/gossip on all advertised addresses
-5. Print summary:
-```
-Mesh: production
-Status: ONLINE
-Listen:     0.0.0.0:7777
-Advertise:  authority.company.com:7777
-            203.113.x.x:7777
-Bootstrap:  YES
-```
-
-### Files
-
-| File | Content |
-|------|---------|
-| `core/mesh/mesh_manager.hpp` | MeshConfig.bootstrap_endpoints, advertise_addresses, listen_address |
-| `core/mesh/mesh_manager.cpp` | Serialize/deserialize new fields |
-| `core/network/interface.hpp/.cpp` | Local interface enumeration |
-| `core/network/public_ip.hpp/.cpp` | Public IP detection (STUN / UDP echo) |
-| `core/network/port_check.hpp/.cpp` | Port availability probe |
-| `core/network/dns.hpp/.cpp` | DNS resolution utility |
-| `core/network/nat_detect.hpp/.cpp` | NAT detection (private vs public mismatch) |
-| `cmd/smo-admin/main.cpp` | `mesh publish` wizard, `bootstrap configure` |
-| `cmd/smo-node/main.cpp` | Read listen_address, startup summary |
-| `core/errors/error_codes.md` | Codes 214-216 |
-| `RFC/0032-bootstrap-publish.md` | New RFC for bootstrap design |
+### Implementation plan (after approval)
+1. Refactor `contract_interface.hpp` per RFC 0036
+2. Refactor `runtime_context.hpp` per RFC 0037
+3. Update `StepStatus` / `PlanContext` per RFC 0038
+4. Replace `NextAction` enum+struct with variant per RFC 0039
+5. Add `ContractRegistry`, `ContractLifecycle` per RFC 0040
+6. Add 30-40 runtime tests: DAG topo sort, cycle detection, parallel exec, retry, compensation, middleware order, NextAction chaining, context binding, dispatcher lookup, EventBus emission
+7. Full project build + verify
 
 ---
 
-## Sprint 5 — Distributed Operating Platform
+## Sprint 36D — Feature Migration to Native Contracts
 
-Sprint 5 plan đã chuyển sang `docs/SPRINT-5.md`.
+Migrate existing features to Native Contracts:
+- JoinContract
+- BootstrapContract
+- GovernanceContract
+- RecoveryContract
+- FileContract
+- ProcessContract
 
-Gồm 8 phases: 5.0 (Architecture Freeze) → 5A (Runtime Foundation) → 5B (Mesh Lifecycle) → 5C (Policy + Scheduler + Contracts) → 5D (Unified CLI + Offline Enrollment) → 5E (Vault) → 5F (Internal API) → 5G (Observability).
+---
 
-See: [SPRINT-5.md](SPRINT-5.md)
+## Sprint 36E — Audit + History + SQLite
+
+- SqliteAuditSubscriber
+- HistoryStore
+- EventStore
+- Dashboard query API
+
+---
+
+## Sprint 36F — Scheduler
+
+- Priority queues (realtime/high/normal/low)
+- Cron-style recurring jobs
+- Deadline enforcement + cancellation
+
+---
+
+## Sprint 36G — Transport + Gossip
+
+- TLS session layer + mTLS
+- Gossip protocol (epidemic sync)
+- Seed resolver + LAN discovery
+- Connection pooling + keepalive
+
+---
+
+## Sprint 36H — WASM Contract Runtime
+
+- wasmtime/wasm3 embed
+- Host functions: FS, Process, Vault, Network, Crypto
+- Gas metering / resource limits
+
+---
+
+## Sprint Roadmap
+
+| Sprint | Focus | Status |
+|--------|-------|--------|
+| **35A–D** | PKI & Governance | ✅ COMPLETE |
+| **36A** | Bootstrap Protocol | ✅ COMPLETE |
+| **36B** | Signature Join Token & Root Redesign | ✅ COMPLETE |
+| **36C** | Runtime Skeleton | ✅ COMPLETE |
+| **36C.5** | Execution Model (DAG, PlanExecutor, Middleware) | ✅ COMPLETE |
+| **36C.6** | **Runtime API Freeze (5 RFCs)** | **✅ COMPLETE (spec) — 9.7/10** |
+| **36D.1** | JoinContract | ✅ COMPLETE |
+| **36D.2** | BootstrapContract | ✅ COMPLETE |
+| **36D.3** | GovernanceContract | ✅ COMPLETE |
+| **36D.4** | RecoveryContract | ✅ COMPLETE |
+| **36D.5** | FileContract / ProcessContract | ✅ COMPLETE |
+| **36E** | Audit + History + SQLite | ⏳ |
+| **36F** | Scheduler (priority/cron/deadline) | ⏳ |
+| **36G** | Transport + Gossip | ⏳ |
+| **36H** | WASM Contract Runtime | ⏳ |
+
+---
+
+## References
+
+- [RFC 0033 — Mesh Genesis & Governance](../RFC/0033-mesh-genesis-governance.md)
+- [RFC 0034 — Bootstrap Protocol](../RFC/0034-bootstrap-protocol.md)
+- [RFC 0035 — Runtime Architecture](../RFC/0035-runtime-architecture.md)
+- [RFC 0036 — Contract ABI Freeze](../RFC/0036-contract-abi-freeze.md) (DRAFT)
+- [RFC 0037 — Runtime Service Injection](../RFC/0037-runtime-service-injection.md) (DRAFT)
+- [RFC 0038 — Execution State Machine](../RFC/0038-execution-state-machine.md) (DRAFT)
+- [RFC 0039 — NextAction Model](../RFC/0039-nextaction-model.md) (DRAFT)
+- [RFC 0040 — Contract Lifecycle + Metadata + Capabilities](../RFC/0040-contract-lifecycle-metadata-capabilities.md) (DRAFT)
