@@ -57,3 +57,7 @@ RFCs are the source of truth for design history.
 | 0038 | Execution State Machine | **APPROVED** | 12-state + Compensating, no TimedOut terminal |
 | 0039 | NextAction Model | **APPROVED** | std::variant, ActionDispatchContract/Message, no ActionComplete |
 | 0040 | Contract Lifecycle + Metadata + Capabilities | **APPROVED** | Registry/Manager split, no Executing lifecycle |
+| 0041 | Runtime Bridge & Protocol Mapping | **DRAFT** | PacketDispatcher ↔ RuntimeKernel bridge |
+| 0042 | Transport Session & Channel Model | **DRAFT** | Connection/Session/Channel/Invocation hierarchy |
+| 0043 | Runtime Serialization Layer | **DRAFT** | CBOR ↔ ContextValue ↔ Packet pipeline |
+| 0044 | Runtime Scheduler | **DRAFT** | Priority queue, delayed, cron, retry, worker pool |

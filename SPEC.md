@@ -32,7 +32,6 @@ Sections are ordered by conceptual dependency, not by implementation order. Read
 | SMIR | SMO Intermediate Representation — canonical IR format that decouples input formats (JSON, DSL, YAML, AI-gen) from the DAG pipeline |
 | DAG Cache | Local cache keyed by (ContractID, env_fingerprint). Avoids recompilation on repeated execution |
 | Capability | A runtime-validated, session-scoped permission. NOT a static role |
-| Opcode | The operation type. Hierarchical namespace: DISCOVERY, CONTROL, EXECUTION, DATA |
 | Session | A scoped execution context with associated capabilities and constraints |
 | DAG | Directed Acyclic Graph — the immutable execution plan produced by the compiler |
 | FSM | Finite State Machine — governs node-level and mesh-level execution transitions |
@@ -120,8 +119,6 @@ Two nodes may disagree about a trust score — and that is fine.
 The Responder uses its local view to decide. If the view is wrong, the evidence exists to correct it later.
 
 This means SMO is **eventually consistent by construction**.
-Two nodes may disagree about a trust score — and that is fine.
-The Responder uses its local view to decide. If the view is wrong, the evidence exists to correct it later.
 
 ### Why DAG (Directed Acyclic Graph)?
 
@@ -214,7 +211,7 @@ A node's private key is generated on the node and NEVER leaves the node. It is n
 The Mesh Root Key is generated during `smo mesh create`, used immediately to sign the first Authority certificate, then exported as an encrypted Recovery Package and **deleted from the runtime filesystem**.
 
 ### I-11: Only Certificates Circulate
-A node NEVER holds a private key that belongs to another node. Only Certificates circulate. A node NEVER holds a private key that belongs to another node.
+A node NEVER holds a private key that belongs to another node. Only Certificates circulate.
 
 ### I-12: Epoch-Based Revocation
 Mesh-wide Epoch counter. Incremented on Authority revocation or major capability change. All certificates with `epoch < current_epoch` are REJECTED. No CRL needed.
@@ -222,13 +219,10 @@ Mesh-wide Epoch counter. Incremented on Authority revocation or major capability
 ### I-13: Two-Factor Session Binding
 Session establishment requires: valid Certificate chain up to Root + signed nonce proving key possession. Both required. Certificate alone is not enough. Signed nonce alone is not enough.
 
-### I-14: Epoch-Based Revocation
-Increment Epoch → all old certificates invalid → nodes must re-enroll. No blacklist needed. Emergency: Authority increments Epoch → all non-re-enrolled nodes lose access.
-
-### I-15: M-of-N Recovery
+### I-14: M-of-N Recovery
 Root Key split via Shamir Secret Sharing (M-of-N). Recovery requires M shares. No single party can recover alone.
 
-### I-16: Capability Ephemerality
+### I-15: Capability Ephemerality
 All capabilities MUST be ephemeral and session-scoped. Capabilities are validated at runtime, never assumed from static configuration.
 
 ### I-16: Protocol Describes Meaning. Transport Describes Bytes.
@@ -240,16 +234,7 @@ If a protocol message does two things, split it into two messages. If a protocol
 ### I-18: Algorithm → RFC → SMO Implementation
 Never go directly from "algorithm idea" to "SMO protocol." Always validate against existing RFCs and academic work (SWIM, HyParView, etc.). Only design new protocols where SMO is creating something genuinely novel (e.g., the Contract protocol).
 
-### I-19: Protocol Describes Meaning. Transport Describes Bytes.
-The Control protocol defines what a Contract is, how it is signed, and how it flows. The Transport layer decides whether to send those bytes over TCP, UDP, or a Unix socket. These are independent decisions.
-
-### I-20: One Protocol Layer, One Responsibility
-If a protocol message does two things, split it into two messages. If a protocol layer does two things, split it into two layers.
-
-### I-21: Algorithm → RFC → SMO Implementation
-Never go directly from "algorithm idea" to "SMO protocol." Always validate against existing RFCs and academic work (SWIM, HyParView, etc.). Only design new protocols where SMO is creating something genuinely novel (e.g., the Contract protocol).
-
-### I-22: Implementation Principles for Networking
+### I-19: Implementation Principles for Networking
 1. **Implement ourselves. Design only where necessary.** Follow existing RFCs for STUN, ICE, NAT traversal. Do not invent new protocols for well-understood problems.
 2. **No third-party networking libraries.** No libnice, no libjuice, no Pion, no Boost.Asio networking. SMO implements its own STUN, ICE, and transport. Rationale: security-critical code must be fully auditable and dependency-free.
 3. **Algorithm → RFC → SMO Implementation.** Never go directly from "algorithm idea" to "SMO protocol." Always validate against existing RFCs and academic work (SWIM, HyParView, etc.). Only design new protocols where SMO is creating something genuinely novel (e.g., the Contract protocol).
@@ -328,9 +313,9 @@ The architecture is decomposed into sixteen layers. No layer may bypass the laye
 
 ---
 
-## IV. SYSTEM LAYERS
+### IV-A. Layered Architecture
 
-The architecture is decomposed into sixteen layers. No layer may bypass the layer below it.
+The architecture is decomposed into fourteen layers. No layer may bypass the layer below it.
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -361,17 +346,17 @@ The architecture is decomposed into sixteen layers. No layer may bypass the laye
 ├──────────────────────────────────────────────┤
 │ 10. DISCOVERY ENGINE + ROUTING                │  SWIM gossip, bootstrap, Peer Record, path selection
 ├──────────────────────────────────────────────┤
-│ 10. SESSION + CERTIFICATE                     │  Keys, identity, capabilities, encryption context
+│ 11. SESSION + CERTIFICATE                     │  Keys, identity, capabilities, encryption context
 ├──────────────────────────────────────────────┤
-│ 11. CONNECTIVITY (STUN/ICE/NAT)               │  STUN RFC 8489, ICE RFC 8445, NAT traversal, relay
+│ 12. CONNECTIVITY (STUN/ICE/NAT)               │  STUN RFC 8489, ICE RFC 8445, NAT traversal, relay
 ├──────────────────────────────────────────────┤
-│ 12. TRANSPORT (TCP/UDP)                       │  Raw bytes in, raw bytes out. Pluggable for QUIC
+│ 13. TRANSPORT (TCP/UDP)                       │  Raw bytes in, raw bytes out. Pluggable for QUIC
 ├──────────────────────────────────────────────┤
-│ 13. RESOURCE MODEL                            │  CPU/RAM/IO limits, cgroup, namespace, seccomp
+│ 14. RESOURCE MODEL                            │  CPU/RAM/IO limits, cgroup, namespace, seccomp
 ├──────────────────────────────────────────────┤
-│ 13. PLUGIN ABI + WASM (future)                │  C ABI plugin interface
+│ 15. PLUGIN ABI + WASM (future)                │  C ABI plugin interface
 ├──────────────────────────────────────────────┤
-│ 14. IDENTITY + MEMBERSHIP                     │  Keypairs, lifecycle, certificates, multi-tenant
+│ 16. IDENTITY + MEMBERSHIP                     │  Keypairs, lifecycle, certificates, multi-tenant
 └──────────────────────────────────────────────┘
 ```
 
@@ -581,64 +566,13 @@ The SMO networking stack defines exactly four protocol layers, each with a disti
 | Execution | TCP | Stateful, long-lived, progress reports must be in order. |
 | Data | TCP or QUIC | Bulk transfer, flow control, independent stream. |
 
-**Network topology reality:** Nodes in a mesh may be behind NAT, CGNAT, firewalls, Docker bridges, Kubernetes pods, Kubernetes pods, VPNs, VPCs, or corporate firewalls. TCP alone cannot solve node addressability. UDP is required for:
+**Network topology reality:** Nodes in a mesh may be behind NAT, CGNAT, firewalls, Docker bridges, Kubernetes pods, VPNs, VPCs, or corporate firewalls. TCP alone cannot solve node addressability. UDP is required for:
 1. Hole punching (open NAT mappings for direct P2P)
 2. STUN (discover public address and port)
 3. ICE (gather candidate pairs, test connectivity, select best pair)
 4. Relay detection (fallback when direct paths fail)
 
 **No QUIC in Phase 1.** The transport abstraction exists so QUIC can be added later without changing any protocol layer.
-
----
-
-### 6.3 UDP vs TCP Decision
-
-| Layer | Transport | Why |
-|---|---|---|
-| Discovery | UDP | Connectionless, broadcast, NAT traversal, low overhead. No state needed. |
-| Control | TCP | Reliable, ordered, stream-oriented. Contracts must not be lost or reordered. |
-| Execution | TCP | Stateful, long-lived, progress reports must be in order. |
-| Data | TCP or QUIC | Bulk transfer, flow control, independent stream. |
-
-**Network topology reality:** Nodes in a mesh may be behind NAT, CGNAT, firewalls, Docker bridges, Kubernetes pods, VPNs, VPCs, or corporate firewalls. TCP alone cannot solve node addressability. UDP is required for:
-1. Hole punching (open NAT mappings for direct P2P)
-2. STUN (discover public address and port)
-3. ICE (gather candidate pairs, test connectivity, select best working pair)
-3. Relay detection (fallback when direct UDP fails)
-
-**No QUIC in Phase 1.** The transport abstraction exists so QUIC can be added later without changing any protocol layer.
-
----
-
-### 6.4 Four Protocol Layers (Detailed)
-
-**Layer 1 — Discovery Protocol.** Responsibilities:
-- Find nodes on the mesh (HELLO, DISCOVER, NODE_INFO)
-- Maintain liveness (HEARTBEAT, PING, OFFLINE)
-- Transport: UDP only (connectionless, low overhead)
-- NEVER carries contracts, capabilities, trust, or execution data
-
-**Layer 2 — Control Protocol.** Responsibilities:
-- Transmit contracts (proposal, acceptance, rejection)
-- Exchange capability grants and revocation
-- Manage sessions (open, close, renew)
-- Coordinate witness attestation
-- Gossip trust digests
-- Transport: TCP only (reliable, ordered, stream-oriented)
-
-**Layer 3 — Execution Protocol.** Responsibilities:
-- Track execution lifecycle after contract acceptance
-- EXEC_START → EXEC_PROGRESS → EXEC_EVENT → (EXEC_CANCEL | EXEC_TIMEOUT) → EXEC_RESULT
-- Transport: TCP only
-- This is NOT the contract phase; this is the "doing work" phase
-
-**Layer 4 — Data Protocol.** Responsibilities:
-- Transfer bulk data referenced by contract (opcodes: PUT, GET)
-- Chunked transfer with ACK and retry per chunk
-- Independent stream — not multiplexed on the control connection
-- Transport: TCP (or future: dedicated QUIC stream)
-
-**Key rule:** A layer MUST NOT assume anything about the layers above it. Discovery does not know what a contract is. Control does not know how execution chunks data.
 
 ---
 
@@ -665,7 +599,7 @@ TRANSPORT LAYER
 
 ---
 
-### 6.5 Hierarchical Opcode Namespace
+### 6.6 Hierarchical Opcode Namespace
 
 SMO uses a two-level opcode namespace:
 
@@ -1571,7 +1505,7 @@ When verifying a certificate:
 ```
 Opcode: EPOCH_INCREMENT
 Payload: new_epoch_number
-Signers: N of M Authorities (threshold TBD)
+Signers: majority of Authorities (floor(N/2)+1)
 Propagation: gossip
 ```
 
@@ -1823,18 +1757,6 @@ This linkage ensures that a ContractID uniquely determines its ABI, and the ABI 
 
 ---
 
-### 8.4 Contract Categories
-
-| Category | Registration | Execution | Examples |
-|----------|-------------|-----------|----------|
-| Kernel | Registered polymorphically at startup | Inline in Executor | `ping`, `whoami`, `session_open` |
-| Native | Registered polymorphically at startup | Runtime calls into native code | `ls`, `put`, `get`, `exec`, `session_open` |
-| User-defined | Registered via Contract Registry | Compiler → DAG → Executor | `backup`, `deploy`, `custom` |
-
-All implement `Contract` interface. Executor calls `contract->execute()`, unaware of category.
-
----
-
 ### 8.5 Kernel Contracts (Built-in)
 
 Registered polymorphically at Runtime startup:
@@ -1872,7 +1794,7 @@ This is the **only** place where Intent → ContractID resolution happens. The R
 
 ---
 
-### 8.6 Contract Registry
+### 8.7 Contract Registry
 
 **Immutable, append-only, Blake3-addressed.**
 
@@ -2411,7 +2333,7 @@ Note: `ErrorCategory` enum values are sequential (0–14). `Protocol` was origin
 3. **Error codes are stable.** Codes are allocated sequentially per category. Never reused.
 4. **Errors carry context.** `source_file`, `source_line`, `timestamp_ns` in every Error.
 5. **Retry classification.** Every error has a `RetryClass`: `NoRetry`, `RetrySafe`, `RetryBackoff`.
-5. **Recovery hint.** Every error has a `Recovery` action: `None`, `RetryOperation`, `Reconnect`, `Reenroll`, `RestartFSM`, `ManualIntervention`, `RebootNode`, `RebootMesh`.
+6. **Recovery hint.** Every error has a `Recovery` action: `None`, `RetryOperation`, `Reconnect`, `Reenroll`, `RestartFSM`, `ManualIntervention`, `RebootNode`, `RebootMesh`.
 
 ---
 
@@ -2444,7 +2366,7 @@ if (!peer) return SMO_ERR_DISCOVERY(400, Info, RetrySafe, None,
 
 ### 15.1 Storage Backend
 
-**SQLite3** — WAL mode, ACID, C API, no ORM, no ORM.
+**SQLite3** — WAL mode, ACID, C API, no ORM.
 
 **Schema versioning:** `PRAGMA user_version` tracks schema version. Migration runner applies incremental SQL scripts.
 
@@ -2526,97 +2448,11 @@ Trust is **local, eventual, and hint-only**.
 
 ---
 
-## XVII. CAPABILITY SYSTEM
 
-*Content from RFC 0002 integrated here*
-
-### 18.1 Capability Model
-
-The runtime knows ONLY capabilities. Roles (READER, CONTRIBUTOR, AUTHORITY) are presets — convenience groupings defined in configuration, not in the runtime.
-
-```
-PRESET: ROLE_READER
-  CAP_HEARTBEAT
-  CAP_VERIFY
-  CAP_FS_READ
-  CAP_SESSION_CREATE
-
-PRESET: ROLE_CONTRIBUTOR
-  = ROLE_READER +
-  CAP_FS_WRITE
-  CAP_EXEC_BASIC
-
-PRESET: ROLE_AUTHORITY
-  = ROLE_CONTRIBUTOR +
-  CAP_GRANT
-  CAP_REVOKE
-  CAP_QUARANTINE
-  CAP_SIGN_NODE
-  CAP_EPOCH_INCREMENT
-  CAP_POLICY_CHANGE
-  CAP_NODE_BOOTSTRAP
-```
-
-**Custom roles are possible.** An admin can define:
-```
-PRESET: ROLE_SOC_ANALYST
-  CAP_FS_READ
-  CAP_EXEC_BASIC
-  CAP_QUARANTINE
-  but NOT CAP_GRANT
-  but NOT CAP_REVOKE
-```
-
-The runtime does not know what "SOC_ANALYST" means. It only checks `CapabilitySet` against the contract's requirements.
 
 ---
 
-### 18.1 Opcode Registry
-
-```cpp
-class OpcodeRegistry {
-public:
-    void register_kernel(const char* name, KernelContract*);
-    void register_native(const char* name, NativeContract*);
-
-    Result<Contract*> resolve(const char* opcode);
-};
-```
-
-**Built-in opcodes (MVP):**
-
-| Opcode | Category | Description |
-|--------|----------|-------------|
-| LS | Native | List directory |
-| PUT | Native | Upload file |
-| GET | Native | Download file |
-| EXEC | Native | Execute command |
-| QUARANTINE | Native | Quarantine node |
-| MKDIR | Native | Create directory |
-| RM | Native | Remove file/dir |
-| CP | Native | Copy file/dir |
-| CUSTOM | User-defined | Plugin contract range 0xFB–0xFE |
-
-Post-MVP adds: MKDIR, RM, CP, CUSTOM (plugin range 0xFB–0xFE).
-
----
-
-### 18.2 Capability Mask
-
-Each opcode declares its required capability mask. The runtime checks `actor_capabilities & opcode_mask == opcode_mask` before execution.
-
-```cpp
-struct OpcodeInfo {
-    uint8_t opcode;
-    uint32_t capability_mask;
-    bool is_native;
-    Contract* contract;  // for native/kernel
-};
-```
-
----
-
-## XVIII. IMPLEMENTATION ORDER
+## XVII. IMPLEMENTATION ORDER
 
 ```
 D0  Network Layer (UDP/TCP/Transport/Connectivity)     [DONE]
@@ -2634,11 +2470,11 @@ D9  Forensics + Compliance (Sprint 10)
 
 ---
 
-## XIX. CLI DESIGN
+## XVIII. CLI DESIGN
 
 *Content from RFC 0019 integrated here*
 
-### 19.1 CLI Design Principles
+### 19.1 Design Principles
 
 1. **Familiar Linux-like syntax** — users should not learn a new syntax
 2. **Context-aware** — selection, mesh, policy persist across commands
@@ -2647,7 +2483,7 @@ D9  Forensics + Compliance (Sprint 10)
 
 ---
 
-### 19.1 Command Structure
+### 19.2 Command Structure
 
 ```
 smo <command> [subcommand] [args...] [flags...]
@@ -2662,7 +2498,7 @@ Global flags:
 
 ---
 
-### 19.2 Command Hierarchy
+### 19.3 Command Hierarchy
 
 ```
 smo
@@ -2714,36 +2550,22 @@ smo
 │   ├── rename --name <name>
 ├── export
 │   ├── --format json|cbor|msgpack
-├── session
-│   ├── open --name <node-name>
-│   ├── close
-│   ├── list
-├── discover
-│   ├── --full                      # Full table
-│   ├── --wait <sec>                # Wait for peers
 ├── policy
 │   ├── use <preset>                # enterprise-standard, readonly, backup, etc.
 │   ├── list
 │   ├── show <name>
-├── session
-│   ├── open --name <node>
-│   ├── close
-│   ├── list
-├── discover
-│   ├── --full
-│   ├── --wait <sec>
 ├── context
 │   ├── list
 │   ├── use <name>
 │   ├── save <name>
 │   ├── clear
 ├── shell
-    # Interactive shell (see §XIX.3)
+    # Interactive shell (see §XIX)
 ```
 
 ---
 
-### 19.3 Interactive Shell (`smo shell`)
+### 19.4 Interactive Shell (`smo shell`)
 
 ```bash
 $ smo shell
@@ -2793,7 +2615,7 @@ lab(none)[safe/single]>
 
 ---
 
-### 19.3 Interactive Shell Commands
+### 19.5 Interactive Shell Commands
 
 | Command | Description |
 |---------|-------------|
@@ -2812,7 +2634,7 @@ lab(none)[safe/single]>
 
 ---
 
-### 19.4 Context Persistence
+### 19.6 Context Persistence
 
 ```
 ~/.smo/
@@ -2827,31 +2649,51 @@ lab(none)[safe/single]>
 
 ---
 
-## XX. IMPLEMENTATION STATUS
+## XIX. IMPLEMENTATION STATUS
 
 ```
-✅ Network Layer (UDP/TCP/Transport/Connectivity/Registry)
-✅ Identity + Certificate + Mesh
-✅ Crypto (Suite 1) + Storage (SQLite)
-✅ Discovery Engine + Membership + Gossip + Heartbeat
-✅ Bootstrap + UDP Transport + Heartbeat
-✅ Runtime Core (Sprint 5)         ← DONE
-│  ├── ContractID: compute()/from_hex(), operator<=>, std::hash
-│  ├── PolicyEngine: ControlLevel/ExecutionScope enums, PolicyResult struct
-│  ├── MeshManager: MeshID-based directories, catalog DB, per-mesh MeshPaths
-│  └── Error model: Protocol=7 (fixed duplicate), Contract=14 category
-✅ Policy Engine + CLI (Sprint 6)  ← DONE
-│  ├── 7 preset policies (enterprise/readonly/backup/incident/maintenance/devops/compliance)
-│  ├── Policy presets via CLI: default / enterprise / emergency
-│  ├── Interactive REPL shell: prompt, auto-complete, history, context
-│  └── CLIContextManager: mesh/selection/execution/session context
-⬜ Native Contracts (Sprint 7)
-⬜ Observability + History (Sprint 8)
-⬜ Workflow + Advanced Policy (Sprint 9)
-⬜ Forensics + Compliance (Sprint 10)
+✅ TCP Transport (framing + handshake + registry)
+✅ UDP Transport + HeartbeatService
+✅ Packet serde (packet_from/to_buffer) + framing
+✅ PacketDispatcher (opcode routing)
+✅ OpcodeRegistry (10 builtin opcodes)
+✅ Identity (NodeID, keypair, nonce signing)
+✅ Certificate chain + Mesh Genesis
+✅ Crypto Suite 1 (Ed25519, X25519, XChaCha20-Poly1305, Blake3)
+✅ Storage (8 SQLite stores)
+✅ Discovery Engine + Membership + Gossip + HealthMonitor
+✅ Session FSM + SessionManager
+✅ GovernanceEngine (2-tier, 16 actions)
+✅ RecoveryEngine (Soft/Hard) + CRL
+✅ JoinToken v2 (CBOR + Ed25519)
+✅ SlotRing + Manifest + RecoveryPackage + RootSession
+✅ RuntimeKernel (8-stage pipeline)          ← Sprint 36C
+│  ├── EventBus (pub/sub)
+│  ├── Dispatcher (contract lookup + execute)
+│  ├── PlanExecutor (12-step FSM + NextAction dispatch)
+│  ├── Middlewares
+│  ├── OutputManager
+│  ├── ContractRegistry + ContractManager
+│  └── 15 RuntimeServices (Crypto, Vault, Storage, FS, Network...)
+✅ 6 Native Contracts                        ← Sprint 36D
+│  ├── JoinContract
+│  ├── BootstrapContract
+│  ├── GovernanceContract
+│  ├── RecoveryContract
+│  ├── FileContract
+│  └── ProcessContract
+✅ Mesh FSM (12 transitions, 5 timeouts)
+✅ BootstrapProtocol (CBOR)
+✅ CLI: smo shell, context, policy presets
+⬜ PacketDispatcher → RuntimeKernel bridge   ← Sprint 37
+⬜ RuntimeKernel::dispatch() (network output)
+⬜ TransportAdapter (send/broadcast)
+⬜ SessionManager wired into accept loop
+⬜ RuntimeKernel::audit() + AuditService
+⬜ Integration test: 2-3 node Join + Bootstrap
 ```
 
-### Sprint 5-6 Details
+### Sprint 36C-Runtime Details (RFC 0036)
 
 **Files changed:**
 
@@ -2879,7 +2721,7 @@ lab(none)[safe/single]>
 
 ---
 
-## XXI. GLOSSARY
+## XX. GLOSSARY
 
 | Term | Definition |
 |---|---|
@@ -2891,10 +2733,8 @@ lab(none)[safe/single]>
 | CapabilityMask | Bitmask of required capabilities for an opcode |
 | SemanticHash | Blake3(ABI_Hash + Contract_JSON) |
 | ABI_Hash | Blake3(canonical_abi_json) |
-| SemanticHash | Blake3(ABI_Hash + Contract_JSON) |
 | DAG Cache | Keyed by (ContractID, env_fingerprint) |
 | MembershipTable | Local view of mesh members (PeerRecord map) |
-| PeerRecord | Node metadata + endpoint + state + health metrics |
 | PeerRecord | NodeID, display_name, hostname, mesh_name, role, tags, platform, arch, version, location, aliases, endpoint, state, last_seen, ping_misses, rtt_ms |
 | EventRecord | sequence, type, timestamp_ns, execution_id, trace_id, contract_id, actor_id, payload, prev_hash, event_hash |
 | ExecutionContext | contract_id, execution_id, trace_id, requester_id, selected_nodes, witness_ids, config, policy_name, trace_id |
