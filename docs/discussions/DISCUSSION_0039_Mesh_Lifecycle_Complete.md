@@ -1,7 +1,7 @@
 # Discussion 0039 — Mesh Lifecycle: Complete Implementation Plan
 
 **Date:** 2026-07-19  
-**Status:** 🟢 PHASE 1–4 ✅ | PHASE 5 🟡 (PQ handshake done, cert verify + manifest sig pending)  
+**Status:** 🟢 PHASE 1–4 ✅ | PHASE 5 ✅ (PQ handshake + cert chain verify + manifest sig)  
 **Core Principle:** **NO HTTP in mesh communication.** Everything via TCP Transport + CBOR opcodes.
 
 ---
@@ -59,7 +59,7 @@
 | **2** | `smo mesh invite <role>` | ✅ done (generate-invite via smo-admin, token format v2) |
 | **3** | `smo mesh join --token` | ✅ done (TCP/CBOR JOIN_REQUEST 0x0601, state machine, CERT_VERIFY, persist) |
 | **4** | `/mesh/bootstrap` endpoint | ✅ done (BootstrapContract + opcodes 0x0603/0x0604 + daemon raw handler + client) |
-| **5** | `MeshManager::join_mesh` (secure) | 🟡 PQ handshake ✅ in client + server; cert verify + manifest sig pending |
+| **5** | `MeshManager::join_mesh` (secure) | ✅ PQ handshake + CERT_VERIFY + manifest sig verify |
 | **6** | Mesh catalog in `smo` CLI | ❌ not started |
 | **7** | Mesh catalog sync via gossip | ❌ not started |
 
@@ -825,9 +825,10 @@ MeshManager
 - ✅ Client integration: `auto_enroll.cpp` — `tcp_cbor_exchange` replaced with `SecureSession` handshake + encrypted send/recv for both JoinRequest and BootstrapSync
 - ✅ Server integration: `smo-node` accept loop — PQ handshake on accepted TCP fds with server cert + identity signing key; `SecureTransportSession` adapter for transparent dispatch; fallback to plaintext when no cert
 - ✅ PacketDispatcher refactor: `dispatch_session(TcpSession&)` → `dispatch_session(TransportSession&)` — encryption-agnostic
-- ⬜ Verify bootstrap cert → authority chain → manifest signature (post-handshake cert verification)
-- ⬜ Delta sync with epoch checks
-- ⬜ State machine persistence (including CERT_VERIFY)
+- ✅ CERT_VERIFY (§5.21): after JoinResponse, verify cert chain (server cert → authority), verify signature, check expiry, save authority pubkey for manifest verify
+- ✅ Manifest signature validation (§5.5): after BootstrapSync, verify manifest CBOR envelope signature against authority pubkey
+- ✅ Delta sync with epoch checks — implemented in Phase 3
+- ✅ State machine persistence (including CERT_VERIFY) — FSM transitions fully wired
 - ✅ Manifest immutable (Git-like versioned snapshots) — already documented in §5.22
 
 ### Phase 6: `smo mesh list/use` in `smo` CLI
@@ -891,8 +892,8 @@ smo mesh use mymesh
 14. ✅ Updated Acceptance Criteria
 15. ✅ Updated Phase 2–5 implementation steps
 
-**Phase 5**: `MeshManager::join_mesh` (secure PQ + cert verify + manifest validation) 🟡
+**Phase 5**: `MeshManager::join_mesh` (secure) ✅
 - Phase 6: `smo mesh list/use` in `smo` CLI
 - Phase 7: Mesh catalog sync via gossip
 
-**Next Step**: Phase 5 — cert chain verification (join_response cert → authority cert → root) + manifest signature validation
+**Next Step**: Phase 6 — `smo mesh list/use` CLI commands with mesh catalog

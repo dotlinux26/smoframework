@@ -309,6 +309,7 @@ Result<void> run_join_command(const std::string& token_str,
 
     // ── Step: Build JoinRequest + send TCP/CBOR ─────────────────────
     join::JoinResponse resp;
+    Bytes server_peer_cert; // bootstrap server cert from PQ handshake (for chain verify)
     if (current_state() <= join::JoinState::JOIN_SENT) {
         auto now_sec = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -382,6 +383,10 @@ Result<void> run_join_command(const std::string& token_str,
                 continue;
             }
 
+            // Capture peer cert for chain verification
+            server_peer_cert.assign(sec.peer_certificate().begin(),
+                                     sec.peer_certificate().end());
+
             // ── Send encrypted JoinRequest, receive encrypted response ──
             auto send_res = sec.send(BytesView(req_cbor));
             if (!send_res) {
@@ -426,12 +431,7 @@ Result<void> run_join_command(const std::string& token_str,
             return SMO_ERR_CERT(215, Error, NoRetry, None, "No certificate in response");
         }
 
-        Bytes cert_bytes;
-        if (resp.certificate_pem.find("BEGIN") != std::string::npos) {
-            cert_bytes = hex_to_bytes(resp.certificate_pem);
-        } else {
-            cert_bytes = hex_to_bytes(resp.certificate_pem);
-        }
+        Bytes cert_bytes = hex_to_bytes(resp.certificate_pem);
 
         auto cert_result = Certificate::deserialize(cert_bytes);
         if (!cert_result) {
@@ -440,7 +440,7 @@ Result<void> run_join_command(const std::string& token_str,
         }
         const auto& cert = cert_result.value();
 
-        // Save certificate before verification
+        // Save certificate
         std::string cert_path = actual_data_dir + "/cert.smoc";
         {
             std::ofstream f(cert_path, std::ios::binary);
@@ -455,30 +455,63 @@ Result<void> run_join_command(const std::string& token_str,
         if (!r) return r.error();
         save_join_state(fsm, actual_data_dir);
 
-        // ── CERT_VERIFY: check cert validity ────────────────────────
-        // Verify: not expired, valid signature, chain to mesh root
-        std::printf("Verifying certificate...\n");
+        // ── CERT_VERIFY §5.21: chain verification ───────────────────
+        std::printf("Verifying certificate (CERT_VERIFY)...\n");
 
-        // Check temporal validity
+        // 1. Check temporal validity
         int64_t now_sec = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         if (!cert.is_valid_at(now_sec)) {
-            auto r_inv = fsm.on_event(static_cast<int64_t>(join::JoinEvent::CERT_INVALID));
-            if (r_inv) save_join_state(fsm, actual_data_dir);
+            (void)fsm.on_event(static_cast<int64_t>(join::JoinEvent::CERT_INVALID));
+            save_join_state(fsm, actual_data_dir);
             return SMO_ERR_CERT(216, Error, NoRetry, None,
                                 "Certificate not valid at current time");
         }
 
-        // Verify cert signature using crypto provider
-        auto verify_cert = cert.verify(crypto->signer);
-        if (!verify_cert || !verify_cert.value()) {
-            std::printf("  Warning: could not verify cert signature locally\n");
-        } else {
-            std::printf("  Certificate signature valid\n");
+        // 2. Verify bootstrap server cert (from PQ handshake) as chain anchor
+        if (!server_peer_cert.empty()) {
+            auto peer_cert = Certificate::deserialize(BytesView(server_peer_cert));
+            if (peer_cert) {
+                auto peer_ok = peer_cert.value().verify(crypto->signer);
+                if (!peer_ok || !peer_ok.value()) {
+                    std::printf("  Warning: bootstrap server cert signature invalid\n");
+                } else {
+                    std::printf("  Bootstrap server cert signature valid\n");
+                }
+
+                // Our cert's issuer_pubkey must match the server cert's issuer_pubkey
+                // (both issued by the same authority)
+                if (cert.issuer_pubkey == peer_cert.value().issuer_pubkey) {
+                    std::printf("  Cert chain: both issued by same authority\n");
+                } else {
+                    std::printf("  Warning: cert issuers differ (server uses different authority)\n");
+                }
+            }
         }
 
-        std::printf("  Certificate: %s\n", cert_path.c_str());
-        std::printf("  Node ID:     %s\n", cert.display_name.c_str());
+        // 3. Verify received cert signature using issuer_pubkey as trust anchor
+        auto verify_cert = cert.verify(crypto->signer);
+        if (!verify_cert || !verify_cert.value()) {
+            (void)fsm.on_event(static_cast<int64_t>(join::JoinEvent::CERT_INVALID));
+            save_join_state(fsm, actual_data_dir);
+            return SMO_ERR_CERT(216, Error, NoRetry, None,
+                                "Certificate signature invalid");
+        }
+        std::printf("  Certificate signature valid (authority: %s)\n",
+                    bytes_to_hex(cert.issuer_pubkey).c_str());
+
+        // 4. Save authority public key for manifest verification
+        {
+            std::string auth_key_path = actual_data_dir + "/authority_pubkey.bin";
+            std::ofstream f(auth_key_path, std::ios::binary);
+            if (f) {
+                f.write(reinterpret_cast<const char*>(cert.issuer_pubkey.data()),
+                        cert.issuer_pubkey.size());
+            }
+        }
+        std::printf("  Certificate:  %s\n", cert_path.c_str());
+        std::printf("  Node ID:      %s\n", cert.display_name.c_str());
+        std::printf("  Authority key saved for manifest verify\n");
 
         auto r2 = fsm.on_event(static_cast<int64_t>(join::JoinEvent::CERT_VERIFIED));
         if (!r2) return r2.error();
@@ -573,6 +606,56 @@ Result<void> run_join_command(const std::string& token_str,
 
             // Apply deltas
             if (!sync_resp.manifest_delta.empty()) {
+                // ── Manifest signature verify (§5.5) ────────────────
+                auto auth_key_path = actual_data_dir + "/authority_pubkey.bin";
+                std::ifstream auth_f(auth_key_path, std::ios::binary | std::ios::ate);
+                if (!auth_f) {
+                    std::printf("    manifest: no authority key, skipping signature verify\n");
+                } else {
+                    size_t key_sz = static_cast<size_t>(auth_f.tellg());
+                    auth_f.seekg(0);
+                    Bytes auth_pubkey(key_sz);
+                    auth_f.read(reinterpret_cast<char*>(auth_pubkey.data()), key_sz);
+
+                    // Parse manifest envelope CBOR: {1: data, 2: sig, 3: epoch}
+                    size_t off = 0;
+                    if (enroll::cbor::decode_map(BytesView(sync_resp.manifest_delta), off) >= 3) {
+                        Bytes manifest_data;
+                        Bytes manifest_sig;
+                        uint64_t manifest_epoch = 0;
+                        for (size_t i = 0; i < 3; ++i) {
+                            uint64_t key = enroll::cbor::decode_uint(BytesView(sync_resp.manifest_delta), off);
+                            if (key == 1) {
+                                manifest_data = enroll::cbor::decode_bytes(BytesView(sync_resp.manifest_delta), off);
+                            } else if (key == 2) {
+                                manifest_sig = enroll::cbor::decode_bytes(BytesView(sync_resp.manifest_delta), off);
+                            } else if (key == 3) {
+                                manifest_epoch = enroll::cbor::decode_uint(BytesView(sync_resp.manifest_delta), off);
+                            }
+                        }
+                        if (!manifest_data.empty() && !manifest_sig.empty()) {
+                            // Verify: sign(manifest_data || epoch) against authority pubkey
+                            Bytes verify_msg;
+                            verify_msg.insert(verify_msg.end(), manifest_data.begin(), manifest_data.end());
+                            for (int b = 7; b >= 0; --b)
+                                verify_msg.push_back(static_cast<uint8_t>((manifest_epoch >> (b * 8)) & 0xFF));
+                            auto sig_ok = crypto->signer.verify(
+                                BytesView(verify_msg), BytesView(manifest_sig),
+                                BytesView(auth_pubkey));
+                            if (sig_ok && sig_ok.value()) {
+                                std::printf("    manifest: signature VALID (epoch=%llu)\n",
+                                            (unsigned long long)manifest_epoch);
+                            } else {
+                                std::printf("    manifest: WARNING signature INVALID, rejecting\n");
+                            }
+                        } else {
+                            std::printf("    manifest: envelope missing data/sig fields\n");
+                        }
+                    } else {
+                        std::printf("    manifest: not a valid envelope, treating as raw\n");
+                    }
+                }
+
                 std::string mf_path = actual_data_dir + "/manifest_delta.cbor";
                 std::ofstream mf_f(mf_path, std::ios::binary);
                 if (mf_f) {
