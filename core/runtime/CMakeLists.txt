@@ -11,6 +11,7 @@ add_library(smo_runtime STATIC
     middleware.cpp
     plan_executor.cpp
     contract_registry.cpp
+    telemetry.cpp
     contracts/join_contract.cpp
     contracts/bootstrap_contract.cpp
     contracts/governance_contract.cpp

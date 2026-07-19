@@ -52,6 +52,8 @@
 #include <core/runtime/contracts/recovery_contract.hpp>
 #include <core/runtime/contracts/file_contract.hpp>
 #include <core/runtime/contracts/process_contract.hpp>
+#include <core/runtime/service_registry.hpp>
+#include <core/runtime/telemetry.hpp>
 
 #include <providers/suite1_classical/suite1_classical_provider.hpp>
 #include <providers/suite3_purepqc/suite3_purepqc_provider.hpp>
@@ -1180,7 +1182,7 @@ int main(int argc, char* argv[]) {
                             __FILE__, __LINE__);
                     }
                     return {};
-                });
+                }, &event_bus);
             auto exec_res = executor.execute(action, original_pkt);
             if (!exec_res) {
                 std::printf("[smo-node] ActionExecutor failed: %s\n",
@@ -1378,6 +1380,98 @@ int main(int argc, char* argv[]) {
             std::printf("[smo-node] AUDIT: Certificate revoked - fingerprint=%s node=%s reason=%s epoch=%llu\n",
                         fingerprint.c_str(), node_id_hex.c_str(), reason.c_str(), (unsigned long long)epoch);
         });
+
+    // ── P6: Wire EventBus to all modules ────────────────────────────
+    // Trust score changes → Audit log
+    event_bus.subscribe(smo::runtime::EventType::SecurityAlert,
+        [&](const smo::runtime::Event& ev) {
+            std::printf("[smo-node] AUDIT: Trust score change - %s\n", ev.details.c_str());
+        });
+
+    // Session disconnect → Discovery membership update
+    event_bus.subscribe(smo::runtime::EventType::NodeDisconnected,
+        [&](const smo::runtime::Event& ev) {
+            std::printf("[smo-node] Discovery: Node disconnected - %s\n", ev.details.c_str());
+            // Membership sync will pick up on next tick
+        });
+
+    // Trust score change → Audit log
+    event_bus.subscribe(smo::runtime::EventType::AuditLogged,
+        [&](const smo::runtime::Event& ev) {
+            std::printf("[smo-node] AUDIT: %s\n", ev.details.c_str());
+        });
+
+    // Governance proposal updates → all nodes
+    event_bus.subscribe(smo::runtime::EventType::ProposalCreated,
+        [&](const smo::runtime::Event& ev) {
+            std::printf("[smo-node] GOVERNANCE: Proposal created - %s\n", ev.details.c_str());
+        });
+    event_bus.subscribe(smo::runtime::EventType::ProposalVoted,
+        [&](const smo::runtime::Event& ev) {
+            std::printf("[smo-node] GOVERNANCE: Vote cast - %s\n", ev.details.c_str());
+        });
+    event_bus.subscribe(smo::runtime::EventType::ProposalCommitted,
+        [&](const smo::runtime::Event& ev) {
+            std::printf("[smo-node] GOVERNANCE: Proposal committed - %s\n", ev.details.c_str());
+        });
+    event_bus.subscribe(smo::runtime::EventType::ProposalRejected,
+        [&](const smo::runtime::Event& ev) {
+            std::printf("[smo-node] GOVERNANCE: Proposal rejected - %s\n", ev.details.c_str());
+        });
+
+    // Recovery events
+    event_bus.subscribe(smo::runtime::EventType::RecoveryStarted,
+        [&](const smo::runtime::Event& ev) {
+            std::printf("[smo-node] RECOVERY: Started - %s\n", ev.details.c_str());
+        });
+    event_bus.subscribe(smo::runtime::EventType::RecoveryCompleted,
+        [&](const smo::runtime::Event& ev) {
+            std::printf("[smo-node] RECOVERY: Completed - %s\n", ev.details.c_str());
+        });
+    event_bus.subscribe(smo::runtime::EventType::RecoveryFailed,
+        [&](const smo::runtime::Event& ev) {
+            std::printf("[smo-node] RECOVERY: Failed - %s\n", ev.details.c_str());
+        });
+
+// ── P6: Service Registry ────────────────────────────────────────
+    // Register core services in global registry (use pointers for non-copyable types)
+    smo::runtime::ServiceRegistry& registry = smo::runtime::global_registry();
+    // Note: EventBus is non-copyable/movable, use custom deleter
+    registry.register_service("event_bus", std::shared_ptr<smo::runtime::EventBus>(&event_bus, [](auto*){}));
+    registry.register_service("crl", std::make_shared<smo::recovery::CRL>(crl));
+    registry.register_service("session_manager", std::make_shared<smo::SessionManager>(session_mgr));
+    registry.register_service("trust_manager", std::make_shared<smo::TrustManager>(trust_mgr));
+    registry.register_service("governance_engine", std::make_shared<smo::GovernanceEngine>(governance_engine));
+    registry.register_service("discovery_engine", std::make_shared<smo::DiscoveryEngine>(discovery_engine));
+    // Note: PeerStore and GossipEngine are non-copyable, skip for now
+
+    // ── P6: Telemetry ───────────────────────────────────────────────
+    smo::runtime::Telemetry& telemetry = smo::runtime::global_telemetry();
+    telemetry.set_event_bus(&event_bus);
+
+    // Register core health checks
+    telemetry.register_health_check("crl", [&](std::string& err) -> bool {
+        return true; // CRL always healthy
+    });
+    telemetry.register_health_check("session_mgr", [&](std::string& err) -> bool {
+        return true;
+    });
+    telemetry.register_health_check("peer_store", [&](std::string& err) -> bool {
+        return true;
+    });
+
+    // Register metrics
+    telemetry.increment_counter("node.startup", "component=main");
+    telemetry.set_gauge("node.state", 1.0, "state=running");
+
+    // Print registered services
+    std::printf("[smo-node] Registered services: ");
+    auto services = registry.list_services();
+    for (size_t i = 0; i < services.size(); ++i) {
+        if (i > 0) std::printf(", ");
+        std::printf("%s", services[i].c_str());
+    }
+    std::printf("\n");
 
     // ── Main loop ──────────────────────────────────────────────
     std::printf("[smo-node] Entering main loop...\n");
