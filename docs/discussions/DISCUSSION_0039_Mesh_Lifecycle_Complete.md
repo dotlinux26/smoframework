@@ -1,7 +1,7 @@
 # Discussion 0039 — Mesh Lifecycle: Complete Implementation Plan
 
-**Date:** 2026-07-19  
-**Status:** 🟢 PHASE 1–5 ✅ | PHASE 6 ✅ (mesh list/use/join catalog) | PHASE 7 ❌  
+**Date:** 2026-07-20  
+**Status:** 🟢 PHASE 1–7 ✅ | PHASE 8 ❌  
 **Core Principle:** **NO HTTP in mesh communication.** Everything via TCP Transport + CBOR opcodes.
 
 ---
@@ -61,7 +61,7 @@
 | **4** | `/mesh/bootstrap` endpoint | ✅ done (BootstrapContract + opcodes 0x0603/0x0604 + daemon raw handler + client) |
 | **5** | `MeshManager::join_mesh` (secure) | ✅ PQ handshake + CERT_VERIFY + manifest sig verify |
 | **6** | Mesh catalog in `smo` CLI | ✅ mesh list/use/join catalog integration |
-| **7** | Mesh catalog sync via gossip | ❌ not started |
+| **7** | Mesh catalog sync via gossip | ✅ MembershipEvent serialization, GossipEngine→MembershipSync wiring, TCP send/receive with GOSP framing, PacketDispatcher gossip intercept, SyncService→GossipEngine delta trigger, smo-node wiring |
 
 ---
 
@@ -838,9 +838,31 @@ MeshManager
 - ✅ `smo mesh join --token` — after join, registers mesh in catalog (`~/.smo/meshes/<name>/mesh.json`), sets as current context
 - ✅ `JoinResult` struct returned from `run_join_command` for CLI to use on success
 
-### Phase 7: Mesh catalog sync via gossip (GossipEngine + MembershipSync)
+### Phase 7: Mesh catalog sync via gossip (GossipEngine + MembershipSync) ✅
+
+- ✅ `MembershipSync::serialize_events()` — binary format: `[count][[type][node_id(32)][ts][seq][payload_len][payload]...]`
+- ✅ `MembershipSync::apply_events()` — deserialize + upsert/remove MembershipTable + re-emit to local subscribers
+- ✅ `GossipEngine::set_membership_sync()` — connects engine to rich event source
+- ✅ `GossipEngine::pending_updates()` → delegates to `MembershipSync::pending_events()` (fallback: PeerRecord list)
+- ✅ `GossipEngine::apply_gossip()` → delegates to `MembershipSync::apply_events()`
+- ✅ `GossipEngine::send_gossip_to_peer()` — **TCP** connect + SMO FrameHeader + `"GOSP"` magic + serialized events
+- ✅ `select_fanout_peers()` → **TCP** endpoints (was UDP stub)
+- ✅ `PacketDispatcher::dispatch_session()` — intercepts gossip frames via `"GOSP"` magic before Packet parse; routes to `GossipEngine::apply_gossip()`
+- ✅ `PacketDispatcher::set_gossip_engine()` — wiring point for incoming gossip
+- ✅ `SyncService::tick()` — membership delta interval auto-calls `gossip.tick(now_ns)`
+- ✅ `cmd/smo-node/main.cpp` — `MembershipSync → GossipEngine → PacketDispatcher` wired in init flow; redundant `pending_events()` removed from daemon loop
+- **Wire format:** `[SMO FrameHeader (9 bytes)][GOSP magic (4 bytes)][serialized MembershipEvents]`
 
 ---
+
+## 7. Remaining Gaps (Phase 8)
+
+| Priority | Gap | Status | Details |
+|----------|-----|--------|---------|
+| **1** | SyncService delta handlers (policy, crl, manifest, routing, contracts) | ❌ | Intervals defined in SyncSchedule but no handlers registered — only `membership` delta triggers gossip |
+| **2** | DiscoveryEngine (UDP) — HELLO/WELCOME/PING/PONG | ❌ | Per §5.20: UDP for LAN discovery + liveness. Only TCP accept loop exists. Lowest priority (gossip TCP already covers WAN peer exchange) |
+| **3** | GOSSIP_SYNC join FSM — wait for actual gossip readiness | ⚠️ stub | `auto_enroll.cpp:718-726` transitions `WAIT_SYNC → GOSSIP_STARTED → GOSSIP_COMPLETE → READY` immediately without waiting for GossipEngine to actually send/receive |
+| **4** | `smo mesh create` — full key generation | ⚠️ partial | Still delegates to `smo-admin create-mesh` for key generation; should integrate directly |
 
 ## Acceptance Criteria (Final)
 
@@ -899,6 +921,6 @@ smo mesh use mymesh
 
 **Phase 5**: `MeshManager::join_mesh` (secure) ✅
 **Phase 6**: `smo mesh list/use` in `smo` CLI ✅
-- Phase 7: Mesh catalog sync via gossip
+**Phase 7**: Mesh catalog sync via gossip ✅
 
-**Next Step**: Phase 7 — Mesh catalog sync via gossip (GossipEngine + MembershipSync)
+**Next Step**: Phase 8a — Wire SyncService delta handlers for policy, crl, manifest, routing, contracts (see §7)
