@@ -31,9 +31,14 @@ struct SyncService::Impl {
             if (interval > 0 && (last == 0 || now_ns - last >= interval)) {
                 last = now_ns;
                 flags |= flag;
+                // Fire external delta callback if registered
                 auto it = delta_callbacks.find(name);
                 if (it != delta_callbacks.end()) {
                     (void)it->second(name);
+                }
+                // For membership delta: trigger gossip fanout
+                if (std::strcmp(name, "membership") == 0) {
+                    gossip.tick(now_ns);
                 }
             }
             flag <<= 1;

@@ -12,7 +12,12 @@
 #include <unordered_map>
 #include <memory>
 
+namespace smo { class GossipEngine; }
+
 namespace smo::network {
+
+// Gossip frame magic: "GOSP" (big-endian uint32) — marks raw gossip payloads
+inline constexpr uint32_t kGossipFrameMagic = 0x474F5350;
 
 // PacketDispatcher routes incoming Packets by opcode_id.
 //
@@ -59,9 +64,13 @@ public:
     // Returns error if both fail or read/write fails.
     Result<void> dispatch_session(TransportSession& session, const hl::Endpoint& remote);
 
+    // Set GossipEngine for automatic gossip message routing.
+    void set_gossip_engine(::smo::GossipEngine* engine) { gossip_engine_ = engine; }
+
 private:
     std::unordered_map<uint32_t, HandlerFunc> handlers_;
     RawHandler raw_handler_;
+    ::smo::GossipEngine* gossip_engine_ = nullptr;
     NodeLifecycleFSM* lifecycle_fsm_ = nullptr;
 };
 

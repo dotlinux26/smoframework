@@ -770,6 +770,9 @@ int main(int argc, char* argv[]) {
     smo::GossipEngine gossip_engine(membership, gossip_cfg);
     smo::network::sync::MembershipSync membership_sync(membership, health_monitor);
 
+    // Wire MembershipSync to GossipEngine for rich event-based gossip
+    gossip_engine.set_membership_sync(&membership_sync);
+
     // Initialize PeerStore and sync with MembershipTable
     smo::PeerStore peer_store;
     if (auto r = peer_store.open(data_dir); !r) {
@@ -1243,6 +1246,7 @@ int main(int argc, char* argv[]) {
     // ── PacketDispatcher setup ─────────────────────────────────
     smo::network::PacketDispatcher dispatcher;
     dispatcher.set_lifecycle_fsm(&node_fsm);
+    dispatcher.set_gossip_engine(&gossip_engine);
 
     // Register runtime handler for all contract opcodes
     dispatcher.register_handler(
@@ -1607,11 +1611,9 @@ int main(int argc, char* argv[]) {
         }
 
         if (now_ns - last_gossip > 5000000000LL) {
+            // GossipEngine::tick() handles fanout: selects peers, serializes
+            // pending MembershipEvents, connects via TCP, and sends framed data.
             gossip_engine.tick(now_ns);
-            auto events = membership_sync.pending_events(gossip_engine.current_sequence());
-            if (!events.empty()) {
-                // TODO: Send gossip messages to fanout peers
-            }
             last_gossip = now_ns;
         }
 

@@ -1,4 +1,5 @@
 #include "packet_dispatcher.hpp"
+#include "core/discovery/gossip.hpp"
 #include "core/transport/framing.hpp"
 #include "protocol/packet/packet.h"
 
@@ -94,6 +95,19 @@ Result<void> PacketDispatcher::dispatch_session(TransportSession& session, const
     BytesView payload;
     size_t frame_sz = frame_read(raw, fh, payload);
     if (frame_sz > 0) {
+        // 2a. Check for gossip frame (starts with "GOSP" magic)
+        if (payload.size() >= 4) {
+            uint32_t gossip_magic = 0;
+            gossip_magic |= (static_cast<uint32_t>(payload[0]) << 24);
+            gossip_magic |= (static_cast<uint32_t>(payload[1]) << 16);
+            gossip_magic |= (static_cast<uint32_t>(payload[2]) << 8);
+            gossip_magic |= static_cast<uint32_t>(payload[3]);
+            if (gossip_magic == kGossipFrameMagic && gossip_engine_) {
+                auto gossip_data = payload.subspan(4);
+                return gossip_engine_->apply_gossip(gossip_data);
+            }
+        }
+
         // 3. Parse as Packet
         auto pkt = packet_from_buffer(payload);
         if (pkt) {

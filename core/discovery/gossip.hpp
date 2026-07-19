@@ -12,26 +12,28 @@
 #include "core/recovery/crl.hpp"
 #include "runtime/event_bus.hpp"
 
+namespace smo::network::sync {
+    class MembershipSync;
+}
+
 namespace smo {
 
 class GossipEngine {
 public:
-    struct GossipMessage {
-        NodeID      node_id;
-        PeerState   state;
-        int64_t     last_seen;
-        uint32_t    incarnation;
-    };
+    static constexpr uint32_t kGossipOpcode = 0x010006;  // GOSSIP_SYNC in DISCOVERY namespace
 
     struct Config {
         uint32_t interval_ms = 5000;
         uint32_t fanout = 3;
-        uint32_t max_payload = 4096;
+        uint32_t max_payload = 65536;
     };
 
     explicit GossipEngine(MembershipTable& table, const Config& cfg);
 
     void set_crl(recovery::CRL* crl) { crl_ = crl; }
+
+    // Set MembershipSync for rich event-based gossip payloads
+    void set_membership_sync(network::sync::MembershipSync* ms) { membership_sync_ = ms; }
 
     static Config default_config();
 
@@ -43,17 +45,20 @@ public:
     void start();
     void stop();
 
+    // Periodic tick — fanout gossip to random peers
     void tick(int64_t now_ns);
 
-    // EventBus listener for RecoveryApproved events
-    // Gossips CRL updates to peers
+    // EventBus listener for RecoveryApproved events — gossips CRL updates
     void on_recovery_approved(const runtime::Event& ev);
 
-    // Get updates since a given sequence number (for delta sync)
-    std::vector<GossipMessage> pending_updates(uint64_t since_sequence) const;
+    // Get pending events since a sequence number (delta sync)
+    Bytes pending_updates(uint64_t since_sequence) const;
 
-    // Apply incoming gossip updates
-    void apply_updates(const std::vector<GossipMessage>& updates);
+    // Apply incoming gossip data (serialized MembershipEvents)
+    Result<void> apply_gossip(BytesView data);
+
+    // Handle an incoming gossip message from a peer
+    static Result<void> handle_gossip_message(BytesView payload, GossipEngine& engine);
 
     // Get current sequence/incarnation
     uint64_t current_sequence() const noexcept { return incarnation_; }
@@ -62,10 +67,10 @@ public:
 
 private:
     void send_gossip_to_peer(const Endpoint& target);
-
     std::vector<Endpoint> select_fanout_peers();
 
     MembershipTable& table_;
+    network::sync::MembershipSync* membership_sync_ = nullptr;
     Config config_;
     std::mt19937_64 rng_;
     uint64_t incarnation_ = 1;
@@ -75,6 +80,10 @@ private:
     std::atomic<bool> running_{false};
 
     recovery::CRL* crl_ = nullptr;
+
+    // TCP connect helper
+    Result<int> tcp_connect_to(const Endpoint& ep) const;
+    static Result<bool> tcp_send(int fd, BytesView data);
 };
 
 } // namespace smo
