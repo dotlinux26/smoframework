@@ -574,12 +574,27 @@ private:
         if (intent.flags.count("create")) {
             std::string name = intent.flags.at("create");
             std::string mesh_dir = home + "/meshes/" + name;
-            if (std::filesystem::create_directories(mesh_dir)) {
-                context_.set_mesh(name);
+            bool is_new = std::filesystem::create_directories(mesh_dir);
+
+            // Write minimal mesh.json if not exists
+            std::string mj = mesh_dir + "/mesh.json";
+            if (!std::filesystem::exists(mj)) {
+                std::ofstream f(mj);
+                if (f) {
+                    f << "{\n";
+                    f << "  \"mesh_id\": \"" << name << "\",\n";
+                    f << "  \"created_at\": " << std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count() << ",\n";
+                    f << "  \"display_name\": \"" << name << "\"\n";
+                    f << "}\n";
+                }
+            }
+
+            context_.set_mesh(name);
+            if (is_new) {
                 std::cout << "Created and switched to mesh: " << name << "\n";
-                std::cout << "  Initialize with: smo-admin --mesh " << name << " create-mesh\n";
+                std::cout << "  Initialize keys: smo-admin --mesh " << name << " create-mesh\n";
             } else {
-                context_.set_mesh(name);
                 std::cout << "Using existing mesh: " << name << "\n";
             }
             return 0;
