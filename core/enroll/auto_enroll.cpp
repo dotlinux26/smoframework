@@ -185,11 +185,11 @@ static Result<void> ensure_dir(const std::string& path) {
 
 // ── Main join command ────────────────────────────────────────────────
 
-Result<void> run_join_command(const std::string& token_str,
-                               const std::string& data_dir,
-                               const std::string& node_name,
-                               uint16_t port,
-                               const std::string& mesh_dir) {
+Result<JoinResult> run_join_command(const std::string& token_str,
+                                     const std::string& data_dir,
+                                     const std::string& node_name,
+                                     uint16_t port,
+                                     const std::string& mesh_dir) {
     (void)mesh_dir;
 
     std::string actual_data_dir = data_dir.empty() ? "/tmp/smo-node-" + std::to_string(getpid()) : data_dir;
@@ -208,7 +208,7 @@ Result<void> run_join_command(const std::string& token_str,
         std::printf("Resuming join from state: %lld\n", (long long)state);
         if (state == join::JoinState::READY) {
             std::printf("Join already completed for this data directory.\n");
-            return {};
+            return JoinResult{};
         }
         if (state == join::JoinState::FAILED) {
             std::printf("Previous join attempt failed. Starting fresh.\n");
@@ -776,9 +776,21 @@ Result<void> run_join_command(const std::string& token_str,
 
         std::printf("\nRun 'smo-node --daemon --data %s --port %d' to start the node.\n",
                     actual_data_dir.c_str(), port);
+
+        // Return join result for CLI to register catalog + set context
+        JoinResult jr;
+        jr.mesh_id = token.mesh_id;
+        jr.role = token.admission.role;
+        jr.profile = token.admission.profile.empty() ? "default" : token.admission.profile;
+        jr.bootstrap_endpoints = !resp.bootstrap_nodes.empty()
+            ? resp.bootstrap_nodes : token.bootstrap_endpoints;
+        jr.manifest_epoch = resp.manifest_epoch;
+        jr.manifest_digest = resp.manifest_digest;
+        jr.node_name = node_name.empty() ? identity->node_id().to_string() : node_name;
+        return jr;
     }
 
-    return {};
+    return JoinResult{};
 }
 
 } // namespace enroll

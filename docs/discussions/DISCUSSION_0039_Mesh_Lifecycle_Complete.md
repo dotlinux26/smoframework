@@ -1,7 +1,7 @@
 # Discussion 0039 — Mesh Lifecycle: Complete Implementation Plan
 
 **Date:** 2026-07-19  
-**Status:** 🟢 PHASE 1–4 ✅ | PHASE 5 ✅ (PQ handshake + cert chain verify + manifest sig)  
+**Status:** 🟢 PHASE 1–5 ✅ | PHASE 6 ✅ (mesh list/use/join catalog) | PHASE 7 ❌  
 **Core Principle:** **NO HTTP in mesh communication.** Everything via TCP Transport + CBOR opcodes.
 
 ---
@@ -60,7 +60,7 @@
 | **3** | `smo mesh join --token` | ✅ done (TCP/CBOR JOIN_REQUEST 0x0601, state machine, CERT_VERIFY, persist) |
 | **4** | `/mesh/bootstrap` endpoint | ✅ done (BootstrapContract + opcodes 0x0603/0x0604 + daemon raw handler + client) |
 | **5** | `MeshManager::join_mesh` (secure) | ✅ PQ handshake + CERT_VERIFY + manifest sig verify |
-| **6** | Mesh catalog in `smo` CLI | ❌ not started |
+| **6** | Mesh catalog in `smo` CLI | ✅ mesh list/use/join catalog integration |
 | **7** | Mesh catalog sync via gossip | ❌ not started |
 
 ---
@@ -831,7 +831,12 @@ MeshManager
 - ✅ State machine persistence (including CERT_VERIFY) — FSM transitions fully wired
 - ✅ Manifest immutable (Git-like versioned snapshots) — already documented in §5.22
 
-### Phase 6: `smo mesh list/use` in `smo` CLI
+### Phase 6: `smo mesh list/use` in `smo` CLI ✅
+- ✅ `smo mesh list` — lists all meshes from `~/.smo/meshes/` with role + mesh_id metadata; current marked with `*`
+- ✅ `smo mesh use <name>` — switches current context via CLIContextManager
+- ✅ `smo mesh create <name>` — creates mesh directory + sets context
+- ✅ `smo mesh join --token` — after join, registers mesh in catalog (`~/.smo/meshes/<name>/mesh.json`), sets as current context
+- ✅ `JoinResult` struct returned from `run_join_command` for CLI to use on success
 
 ### Phase 7: Mesh catalog sync via gossip (GossipEngine + MembershipSync)
 
@@ -893,7 +898,7 @@ smo mesh use mymesh
 15. ✅ Updated Phase 2–5 implementation steps
 
 **Phase 5**: `MeshManager::join_mesh` (secure) ✅
-- Phase 6: `smo mesh list/use` in `smo` CLI
+**Phase 6**: `smo mesh list/use` in `smo` CLI ✅
 - Phase 7: Mesh catalog sync via gossip
 
-**Next Step**: Phase 6 — `smo mesh list/use` CLI commands with mesh catalog
+**Next Step**: Phase 7 — Mesh catalog sync via gossip (GossipEngine + MembershipSync)

@@ -518,7 +518,38 @@ private:
                     if (!entry.is_directory()) continue;
                     std::string name = entry.path().filename().string();
                     bool is_current = (name == current_name);
-                    std::cout << (is_current ? "  * " : "    ") << name << "\n";
+
+                    // Read mesh.json for metadata
+                    std::string role, mesh_id;
+                    std::ifstream mf(entry.path().string() + "/mesh.json");
+                    if (mf) {
+                        std::string line;
+                        while (std::getline(mf, line)) {
+                            auto rp = line.find("\"role\"");
+                            if (rp != std::string::npos) {
+                                auto c1 = line.find('"', rp + 7);
+                                if (c1 != std::string::npos) {
+                                    auto c2 = line.find('"', c1 + 1);
+                                    if (c2 != std::string::npos)
+                                        role = line.substr(c1 + 1, c2 - c1 - 1);
+                                }
+                            }
+                            auto mp = line.find("\"mesh_id\"");
+                            if (mp != std::string::npos) {
+                                auto c1 = line.find('"', mp + 10);
+                                if (c1 != std::string::npos) {
+                                    auto c2 = line.find('"', c1 + 1);
+                                    if (c2 != std::string::npos)
+                                        mesh_id = line.substr(c1 + 1, c2 - c1 - 1);
+                                }
+                            }
+                        }
+                    }
+
+                    std::cout << (is_current ? "  * " : "    ") << name;
+                    if (!role.empty()) std::cout << " (" << role << ")";
+                    if (!mesh_id.empty() && mesh_id != name) std::cout << " [" << mesh_id.substr(0, 8) << "]";
+                    std::cout << "\n";
                 }
             } else {
                 std::cout << "  (none)\n";
@@ -533,7 +564,7 @@ private:
             std::string mesh_dir = home + "/meshes/" + name;
             if (!std::filesystem::is_directory(mesh_dir)) {
                 std::cerr << "Error: mesh '" << name << "' not found\n";
-                std::cerr << "  Create it: smo-admin --mesh " << name << " create-mesh\n";
+                std::cerr << "  Available: smo mesh list\n";
                 return 1;
             }
             context_.set_mesh(name);
@@ -620,6 +651,39 @@ private:
                     std::cerr << "Error: " << result.error().message << "\n";
                     return 1;
                 }
+
+                // Register mesh in catalog + set context
+                const auto& jr = result.value();
+                std::string mesh_name = jr.mesh_id.size() >= 8
+                    ? jr.mesh_id.substr(0, 8)
+                    : jr.mesh_id;
+                std::string mesh_dir = home + "/meshes/" + mesh_name;
+                std::filesystem::create_directories(mesh_dir);
+
+                // Write mesh.json with metadata
+                {
+                    std::ofstream f(mesh_dir + "/mesh.json");
+                    if (f) {
+                        f << "{\n";
+                        f << "  \"mesh_id\": \"" << jr.mesh_id << "\",\n";
+                        f << "  \"role\": \"" << jr.role << "\",\n";
+                        f << "  \"profile\": \"" << jr.profile << "\",\n";
+                        f << "  \"manifest_epoch\": " << jr.manifest_epoch << ",\n";
+                        f << "  \"manifest_digest\": \"";
+                        for (auto b : jr.manifest_digest) f << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+                        f << "\",\n";
+                        f << "  \"bootstrap_endpoints\": [\n";
+                        for (size_t i = 0; i < jr.bootstrap_endpoints.size(); ++i) {
+                            if (i > 0) f << ",\n";
+                            f << "    \"" << jr.bootstrap_endpoints[i] << "\"";
+                        }
+                        f << "\n  ]\n";
+                        f << "}\n";
+                    }
+                }
+
+                context_.set_mesh(mesh_name);
+                std::cout << "Joined mesh: " << mesh_name << "\n";
             }
             return 0;
         }
