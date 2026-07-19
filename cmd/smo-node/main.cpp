@@ -17,6 +17,7 @@
 #include <core/types.hpp>
 #include <core/transport/transport.hpp>
 #include <core/transport/tcp_transport.hpp>
+#include <core/transport/secure_session.hpp>
 #include <core/network/udp/udp_transport.hpp>
 #include <core/select/selector.hpp>
 #include <core/network/udp/heartbeat_service.hpp>
@@ -34,6 +35,7 @@
 #include <core/network/packet_dispatcher.hpp>
 #include <core/fsm/node_lifecycle_fsm.hpp>
 #include <core/bootstrap/bootstrap_protocol.hpp>
+#include <core/join/join_protocol.hpp>
 #include <core/runtime/runtime_bridge.hpp>
 #include <core/runtime/middleware_pipeline.hpp>
 #include <core/runtime/policy_middleware.hpp>
@@ -568,6 +570,33 @@ static int cmd_pubkey(bool do_copy, bool show_fingerprint, const std::string& da
     return 0;
 }
 
+// ── SecureTransportSession — wraps SecureSession as TransportSession ──
+struct SecureTransportSession : public smo::TransportSession {
+    smo::SecureSession sec;
+    smo::Endpoint remote;
+    bool open_ = true;
+
+    SecureTransportSession(smo::SecureSession&& s, smo::Endpoint ep)
+        : sec(std::move(s)), remote(std::move(ep)) {}
+
+    smo::Result<void> send(smo::BytesView data) override {
+        return sec.send(data);
+    }
+    smo::Result<smo::Bytes> recv(size_t) override {
+        return sec.recv();
+    }
+    smo::Result<void> close() override {
+        open_ = false;
+        return {};
+    }
+    smo::Endpoint remote_endpoint() const override {
+        return remote;
+    }
+    bool is_open() const override {
+        return open_;
+    }
+};
+
 // ===========================================================================
 // Main
 // ===========================================================================
@@ -714,6 +743,16 @@ int main(int argc, char* argv[]) {
     node_id_to_hex(local_id, local_id_hex);
     std::printf("[smo-node] Local NodeID: %s (state: %s)\n",
                 local_id_hex.c_str(), smo::to_string(local_identity.state()));
+
+    // Load server certificate for PQ handshake
+    std::string cert_path = data_dir + "/node.cert.smoc";
+    smo::Bytes server_cert_blob = load_file_binary(cert_path);
+    if (server_cert_blob.empty()) {
+        std::fprintf(stderr, "[smo-node] Warning: no certificate at %s, PQ handshake disabled\n",
+                     cert_path.c_str());
+    }
+    smo::Bytes server_signing_key(local_identity.secret_key().begin(),
+                                   local_identity.secret_key().end());
 
     // Register transports BEFORE any references
     smo::TransportRegistry::instance().register_transport(
@@ -1048,6 +1087,9 @@ int main(int argc, char* argv[]) {
     runtime_bridge.register_route(
         static_cast<uint32_t>(smo::Opcode::BOOTSTRAP_INFO),
         "system.bootstrap", "info");
+    runtime_bridge.register_route(
+        smo::join::kOpcodeBootstrapSyncReq,
+        "system.bootstrap", "bootstrap_sync");
 
     // Register routes for JoinContract
     runtime_bridge.register_route(
@@ -1235,10 +1277,12 @@ int main(int argc, char* argv[]) {
         static_cast<uint32_t>(smo::Opcode::FILE_OP), runtime_handler);
     dispatcher.register_handler(
         static_cast<uint32_t>(smo::Opcode::PROCESS), runtime_handler);
+    dispatcher.register_handler(
+        smo::join::kOpcodeBootstrapSyncReq, runtime_handler);
 
     // ── Raw handler: discovery protocol (HelloMsg, PingMsg, etc.) ──
     dispatcher.register_raw_handler(
-        [&](smo::BytesView raw, smo::TcpSession& session,
+        [&](smo::BytesView raw, smo::TransportSession& session,
             const smo::hl::Endpoint& remote) -> smo::Result<void>
     {
         int64_t now_ns = static_cast<int64_t>(
@@ -1283,6 +1327,75 @@ int main(int argc, char* argv[]) {
             pong.timestamp = ping.value().timestamp;
             auto pong_data = pong.serialize();
             session.send(pong_data);
+            return {};
+        }
+
+        // ── Try join protocol (raw CBOR: 4-byte length prefix + CBOR) ──
+        // Used by `smo mesh join` CLI via auto_enroll.cpp
+        auto try_join_protocol = [&]() -> bool {
+            if (raw.size() < 4) return false;
+            uint32_t payload_len = (static_cast<uint32_t>(raw[0]) << 24) |
+                                   (static_cast<uint32_t>(raw[1]) << 16) |
+                                   (static_cast<uint32_t>(raw[2]) << 8)  |
+                                    static_cast<uint32_t>(raw[3]);
+            if (payload_len == 0 || 4 + payload_len > raw.size()) return false;
+
+            smo::BytesView cbor_data = raw.subspan(4, payload_len);
+
+            // Wrap CBOR response in 4-byte length prefix and send
+            auto send_cbor_resp = [&](const smo::Bytes& cbor) -> bool {
+                uint32_t len = static_cast<uint32_t>(cbor.size());
+                uint8_t hdr[4];
+                hdr[0] = static_cast<uint8_t>((len >> 24) & 0xFF);
+                hdr[1] = static_cast<uint8_t>((len >> 16) & 0xFF);
+                hdr[2] = static_cast<uint8_t>((len >> 8) & 0xFF);
+                hdr[3] = static_cast<uint8_t>(len & 0xFF);
+                smo::Bytes out;
+                out.insert(out.end(), hdr, hdr + 4);
+                out.insert(out.end(), cbor.begin(), cbor.end());
+                auto send_res = session.send(smo::BytesView(out));
+                return static_cast<bool>(send_res);
+            };
+
+            // Try JoinRequest (opcode 0x0601)
+            auto join_req = smo::join::JoinRequest::decode_cbor(cbor_data);
+            if (join_req) {
+                std::printf("[smo-node] Raw handler: JoinRequest from %s\n",
+                            remote.address.c_str());
+                auto join_resp = smo::join::process_join_request(
+                    join_req.value(), mesh_manager, authority);
+                if (join_resp) {
+                    auto cbor = join_resp.value().encode_cbor();
+                    send_cbor_resp(cbor);
+                    return true;
+                }
+                std::printf("[smo-node] JoinRequest failed: %s\n",
+                            join_resp.error().message.c_str());
+                return false;
+            }
+
+            // Try BootstrapSyncRequest (opcode 0x0603)
+            auto sync_req = smo::join::BootstrapSyncRequest::decode_cbor(cbor_data);
+            if (sync_req) {
+                std::printf("[smo-node] Raw handler: BootstrapSyncRequest from %s\n",
+                            remote.address.c_str());
+                auto sync_resp = smo::join::process_bootstrap_sync(
+                    sync_req.value(), mesh_manager, authority, &crl);
+                if (sync_resp) {
+                    auto cbor = sync_resp.value().encode_cbor();
+                    send_cbor_resp(cbor);
+                    return true;
+                }
+                std::printf("[smo-node] BootstrapSync failed: %s\n",
+                            sync_resp.error().message.c_str());
+                return false;
+            }
+
+            return false;
+        };
+
+        if (try_join_protocol()) {
+            std::printf("[smo-node] Join protocol handled successfully\n");
             return {};
         }
 
@@ -1508,7 +1621,7 @@ int main(int argc, char* argv[]) {
             last_peerstore_sync = now_ns;
         }
 
-        // Accept TCP connections via PacketDispatcher
+        // Accept TCP connections
         auto tcp_session = lstnr->accept();
         if (tcp_session) {
             auto remote_str = tcp_session.value()->remote_endpoint().to_string();
@@ -1532,14 +1645,44 @@ int main(int argc, char* argv[]) {
                 tcp_session.value()->close();
                 continue;
             }
-            auto dispatch_res = dispatcher.dispatch_session(
-                *tcp_ses, remote_ep);
-            if (!dispatch_res) {
-                std::printf("[smo-node] Dispatch failed: %s\n",
-                            dispatch_res.error().message.c_str());
-            }
 
-            tcp_session.value()->close();
+            // ── PQ handshake (if certificate available) ─────────────
+            if (!server_cert_blob.empty()) {
+                smo::SecureSession::Config sec_cfg;
+                sec_cfg.role = smo::SecureSession::Role::Server;
+                sec_cfg.server_cert = server_cert_blob;
+                sec_cfg.signing_secret_key = server_signing_key;
+
+                int client_fd = tcp_ses->release_fd();
+                smo::SecureSession sec(client_fd, sec_cfg, *crypto);
+                auto hs = sec.handshake();
+                if (!hs) {
+                    std::printf("[smo-node] PQ handshake failed: %s, closing\n",
+                                hs.error().message.c_str());
+                    tcp_session.value()->close();
+                    continue;
+                }
+                std::printf("[smo-node] PQ handshake established\n");
+
+                SecureTransportSession secure_ses(
+                    std::move(sec),
+                    smo::Endpoint{"tcp", remote_ep.address, remote_ep.port, ""});
+                auto dispatch_res = dispatcher.dispatch_session(secure_ses, remote_ep);
+                if (!dispatch_res) {
+                    std::printf("[smo-node] Dispatch failed: %s\n",
+                                dispatch_res.error().message.c_str());
+                }
+                secure_ses.close();
+            } else {
+                // Fallback: plaintext (no certificate available)
+                auto dispatch_res = dispatcher.dispatch_session(
+                    *tcp_ses, remote_ep);
+                if (!dispatch_res) {
+                    std::printf("[smo-node] Dispatch failed: %s\n",
+                                dispatch_res.error().message.c_str());
+                }
+                tcp_session.value()->close();
+            }
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));

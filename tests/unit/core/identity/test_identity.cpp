@@ -122,7 +122,7 @@ static const CryptoProvider kMockSuite1{
     { mock_hash, mock_hmac },
     { nullptr, nullptr },  // perf_hash
     { mock_encrypt, mock_decrypt },
-    { mock_encaps, mock_decaps },
+    { mock_keygen, mock_encaps, mock_decaps },
     { mock_keygen, mock_sign, mock_verify }
 };
 

@@ -102,6 +102,7 @@ const CryptoProvider& get_suite3_purepqc_provider() noexcept {
             .decrypt = xchacha20_decrypt_fn,
         },
         .kem = KemImpl{
+            .generate_keypair = mlkem_gen,
             .encapsulate = mlkem_encap,
             .decapsulate = mlkem_decap,
         },

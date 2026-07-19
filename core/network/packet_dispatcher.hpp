@@ -12,7 +12,6 @@
 #include <unordered_map>
 #include <memory>
 
-namespace smo { class TcpSession; }
 namespace smo::network {
 
 // PacketDispatcher routes incoming Packets by opcode_id.
@@ -32,7 +31,7 @@ class PacketDispatcher {
 public:
     using HandlerFunc = std::function<Result<void>(Packet&&, const hl::Endpoint&, hl::Transport&)>;
     // RawHandler receives raw unframed bytes for protocols that don't use the Packet format
-    using RawHandler = std::function<Result<void>(BytesView, TcpSession&, const hl::Endpoint&)>;
+    using RawHandler = std::function<Result<void>(BytesView, TransportSession&, const hl::Endpoint&)>;
 
     PacketDispatcher() = default;
 
@@ -55,10 +54,10 @@ public:
     //   other → DENY
     Result<void> dispatch(Packet&& pkt, const hl::Endpoint& remote, hl::Transport& transport);
 
-    // Dispatch a frame from a low-level TcpSession.
+    // Dispatch a frame from a low-level TransportSession.
     // First tries framed Packet format; if that fails, falls back to raw handler.
     // Returns error if both fail or read/write fails.
-    Result<void> dispatch_session(TcpSession& session, const hl::Endpoint& remote);
+    Result<void> dispatch_session(TransportSession& session, const hl::Endpoint& remote);
 
 private:
     std::unordered_map<uint32_t, HandlerFunc> handlers_;

@@ -7,6 +7,7 @@ target_sources(smo_core PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/udp/udp_transport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/udp/heartbeat_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sync/membership_sync.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sync/sync_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/interface.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/public_ip.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/port_check.cpp
@@ -29,6 +30,7 @@ target_sources(smo_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/transport/selector.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/transport/dispatcher.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sync/membership_sync.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sync/sync_service.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/interface.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/public_ip.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/port_check.hpp

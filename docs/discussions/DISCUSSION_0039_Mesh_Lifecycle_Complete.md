@@ -1,7 +1,7 @@
 # Discussion 0039 — Mesh Lifecycle: Complete Implementation Plan
 
 **Date:** 2026-07-19  
-**Status:** 🟢 IMPLEMENTATION PLAN — Ready for execution  
+**Status:** 🟢 PHASE 1–4 ✅ | PHASE 5 🟡 (PQ handshake done, cert verify + manifest sig pending)  
 **Core Principle:** **NO HTTP in mesh communication.** Everything via TCP Transport + CBOR opcodes.
 
 ---
@@ -46,22 +46,22 @@
 | Mesh creation | `smo-admin create-mesh <name> <dir>` | ✅ Creates mesh + authority + mesh.json |
 | Bootstrap config | `smo-admin mesh publish --listen ... --endpoint ...` | ✅ Configures bootstrap endpoints |
 | Generate invite | `smo-admin generate-invite --role <role> --expire <dur> --endpoint <ep>` | ✅ Creates JoinToken v2 (CBOR + sig) |
-| Join via token | `smo-node --join --token SMO-JOIN-... --port <p> --data <dir>` | ✅ (via HTTP `/enroll` - **TO REPLACE**) |
-| Bootstrap | `smo-node --daemon --seed <ip:port>` | ✅ HelloMsg → BootstrapResponse → snapshot |
+| Join via token | `smo-node --join --token SMO-JOIN-... --port <p> --data <dir>` | ✅ TCP/CBOR JOIN_REQUEST (0x0601) |
+| Bootstrap | `smo-node --daemon --seed <ip:port>` | ✅ HelloMsg → BootstrapResponse → snapshot + BootstrapSync (0x0603) |
 
 ---
 
-## 2. MISSING (No HTTP!)
+## 2. Completed & Remaining
 
-| Priority | Feature | Missing Piece |
-|----------|---------|---------------|
-| **1** | `smo mesh create <name>` | `smo` CLI wiring (not `smo-admin`) |
-| **2** | `smo mesh invite <role>` | Intent parser has "invite" but no handler |
-| **3** | `smo mesh join --token` | `smo` CLI wiring for `mesh join --token` |
-| **4** | `/mesh/bootstrap` endpoint | `BootstrapContract` handler for post-join sync |
-| **5** | `MeshManager::join_mesh` | Stub → implement seed bootstrap |
-| **6** | Mesh catalog in `smo` CLI | `smo mesh list` / `use <name>` |
-| **7** | Mesh catalog sync via gossip | `GossipEngine` + `MembershipSync` |
+| Priority | Feature | Status |
+|----------|---------|--------|
+| **1** | `smo mesh create <name>` | ✅ done (MeshManager::create_mesh + smo-cli handler) |
+| **2** | `smo mesh invite <role>` | ✅ done (generate-invite via smo-admin, token format v2) |
+| **3** | `smo mesh join --token` | ✅ done (TCP/CBOR JOIN_REQUEST 0x0601, state machine, CERT_VERIFY, persist) |
+| **4** | `/mesh/bootstrap` endpoint | ✅ done (BootstrapContract + opcodes 0x0603/0x0604 + daemon raw handler + client) |
+| **5** | `MeshManager::join_mesh` (secure) | 🟡 PQ handshake ✅ in client + server; cert verify + manifest sig pending |
+| **6** | Mesh catalog in `smo` CLI | ❌ not started |
+| **7** | Mesh catalog sync via gossip | ❌ not started |
 
 ---
 
@@ -791,35 +791,44 @@ MeshManager
 
 ## 6. Updated Implementation Phases
 
-### Phase 1: `smo mesh create` + `smo mesh invite`
+### Phase 1: `smo mesh create` + `smo mesh invite` ✅
 - `cmd/smo-cli/main.cpp` → handlers for `mesh create`, `mesh invite`
 - `MeshManager::create_mesh()` ✅ exists, `generate_invite()` ✅ exists
 
-### Phase 2: `smo mesh join --token` (TCP/CBOR)
+### Phase 2: `smo mesh join --token` (TCP/CBOR) ✅
 - `cmd/smo-cli/main.cpp` → handler for `mesh join --token`
-- `core/enroll/auto_enroll.cpp` — replace HTTP POST `/enroll` with TCP/CBOR
-- JOIN_REQUEST: add timestamp, nonce, csr_hash, request_signature (replay protection)
-- JOIN_RESPONSE: lightweight — cert, mesh_id, manifest_digest, manifest_epoch, bootstrap_nodes (NO full manifest)
-- **State machine:** add CERT_VERIFY state between CERT_RECEIVED and BOOTSTRAP_SYNC
-- Persist state after each step (resume on crash)
+- `core/enroll/auto_enroll.cpp` — replaced HTTP POST `/enroll` with TCP/CBOR ✅
+- JOIN_REQUEST: add timestamp, nonce, csr_hash, request_signature (replay protection) ✅
+- JOIN_RESPONSE: lightweight — cert, mesh_id, manifest_digest, manifest_epoch, bootstrap_nodes (NO full manifest) ✅
+- **State machine:** add CERT_VERIFY state between CERT_RECEIVED and BOOTSTRAP_SYNC ✅
+- Persist state after each step (resume on crash) ✅
 
-### Phase 3: `/mesh/bootstrap` endpoint
-- `BootstrapContract::handle_bootstrap_sync()` — BootstrapService is stateless
-- Opcodes: `0x0603` (request), `0x0604` (response)
-- Delta sync: `manifest_delta?`, `membership_delta?`, `policy_delta?`, `crl_delta?`
-- Epoch-based request: `{ manifest_epoch, crl_epoch, membership_epoch, policy_version }`
+### Phase 3: `/mesh/bootstrap` endpoint ✅
+- `BootstrapContract::handle_bootstrap_sync()` — BootstrapService is stateless ✅
+- Opcodes: `0x0603` (request), `0x0604` (response) — registered in PacketDispatcher + RuntimeBridge ✅
+- Delta sync: `manifest_delta?`, `membership_delta?`, `policy_delta?`, `crl_delta?` ✅
+- Epoch-based request: `{ manifest_epoch, crl_epoch, membership_epoch, policy_version }` ✅
+- Client-side BootstrapSync TCP/CBOR in `auto_enroll.cpp` ✅
+- Daemon raw handler wired for JoinRequest + BootstrapSyncRequest ✅
 
-### Phase 4: Service Decomposition
-- `MeshManager` → `JoinService` + `BootstrapService` (stateless) + `SyncService` + `DiscoveryEngine` (UDP)
-- Separate stores: `PeerStore`, `SeedStore`, `AuthorityStore`, `ManifestStore`, `PolicyStore`
-- Each service independently testable
+### Phase 4: Service Decomposition ✅ (MeshManager refactored)
+- Stores built: `SeedStore` (core/discovery/) ✅, `AuthorityStore` (core/authority/) ✅, `ManifestStore` (core/storage/) ✅, `PolicyStore` exists in `storage/policy_store/`
+- Services built: `JoinService` (core/join/) ✅, `BootstrapService` (core/bootstrap/) ✅, `SyncService` (core/network/sync/) ✅
+- `MeshManager` refactor ✅ — service injection via `set_join_service`/`set_bootstrap_service`/`set_sync_service`, `join_mesh()`/`leave_mesh()`/`delete_mesh()` delegate to services
+- `DiscoveryEngine` (UDP) ❌ **NOT DONE** (separate concern, see §5.20)
+- Build: ✅ all targets (`smo_core`, `smo-cli`, `smo-admin`, `smo-node`)
+- Phase 5 SecureSession integration started: `auto_enroll.cpp` + `smo-node` accept loop ✅
 
 ### Phase 5: `MeshManager::join_mesh` (Secure)
-- TLS/PQ handshake
-- Verify bootstrap cert → authority → manifest signature
-- Delta sync with epoch checks
-- State machine persistence (including CERT_VERIFY)
-- Manifest immutable (Git-like versioned snapshots)
+- ✅ `SecureSession` class: PQ 1-RTT KEM handshake + XChaCha20-Poly1306 AEAD + HKDF key derivation
+- ✅ `KemImpl::generate_keypair` added to all 3 suites (Classical/Modern/PurePQC)
+- ✅ Client integration: `auto_enroll.cpp` — `tcp_cbor_exchange` replaced with `SecureSession` handshake + encrypted send/recv for both JoinRequest and BootstrapSync
+- ✅ Server integration: `smo-node` accept loop — PQ handshake on accepted TCP fds with server cert + identity signing key; `SecureTransportSession` adapter for transparent dispatch; fallback to plaintext when no cert
+- ✅ PacketDispatcher refactor: `dispatch_session(TcpSession&)` → `dispatch_session(TransportSession&)` — encryption-agnostic
+- ⬜ Verify bootstrap cert → authority chain → manifest signature (post-handshake cert verification)
+- ⬜ Delta sync with epoch checks
+- ⬜ State machine persistence (including CERT_VERIFY)
+- ✅ Manifest immutable (Git-like versioned snapshots) — already documented in §5.22
 
 ### Phase 6: `smo mesh list/use` in `smo` CLI
 
@@ -873,7 +882,7 @@ smo mesh use mymesh
 5. ✅ 5.16 Join Token nonce (token_id) for replay protection
 6. ✅ 5.17 JOIN_REQUEST timestamp+nonce+signature replay protection
 7. ✅ 5.18 BootstrapService stateless + store separation
-8. ✅ 5.19 Gossip routing_delta added
+8. ✅ 5.19 Gossip routing_delta added (in SyncSchedule)
 9. ✅ 5.20 Discovery (UDP) vs Bootstrap (TCP) separation
 10. ✅ 5.21 State machine: CERT_VERIFY added
 11. ✅ 5.22 Manifest immutable (Git-like)
@@ -882,4 +891,8 @@ smo mesh use mymesh
 14. ✅ Updated Acceptance Criteria
 15. ✅ Updated Phase 2–5 implementation steps
 
-**Ready to start Phase 1**: `smo mesh create` + `invite` handlers in `cmd/smo-cli/main.cpp`?
+**Phase 5**: `MeshManager::join_mesh` (secure PQ + cert verify + manifest validation) 🟡
+- Phase 6: `smo mesh list/use` in `smo` CLI
+- Phase 7: Mesh catalog sync via gossip
+
+**Next Step**: Phase 5 — cert chain verification (join_response cert → authority cert → root) + manifest signature validation

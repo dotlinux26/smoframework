@@ -1,15 +1,14 @@
 #include "packet_dispatcher.hpp"
-#include "core/transport/tcp_transport.hpp"
 #include "core/transport/framing.hpp"
 #include "protocol/packet/packet.h"
 
 namespace smo::network {
 
-// ── SessionTransport — wraps a single TcpSession as hl::Transport ─────
+// ── SessionTransport — wraps a single TransportSession as hl::Transport ─
 
 class SessionTransport final : public hl::Transport {
 public:
-    SessionTransport(class TcpSession& session, const hl::Endpoint& remote)
+    SessionTransport(TransportSession& session, const hl::Endpoint& remote)
         : session_(&session), remote_(remote) {}
 
     std::error_code listen(const hl::Endpoint&,
@@ -43,7 +42,7 @@ public:
     void close() noexcept override {}
 
 private:
-    class TcpSession* session_;
+    TransportSession* session_;
     hl::Endpoint remote_;
 };
 
@@ -81,7 +80,7 @@ Result<void> PacketDispatcher::dispatch(Packet&& pkt, const hl::Endpoint& remote
     return it->second(std::move(pkt), remote, transport);
 }
 
-Result<void> PacketDispatcher::dispatch_session(TcpSession& session, const hl::Endpoint& remote) {
+Result<void> PacketDispatcher::dispatch_session(TransportSession& session, const hl::Endpoint& remote) {
     // 1. Read raw framed data
     auto data = session.recv(65536);
     if (!data) {

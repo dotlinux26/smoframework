@@ -8,6 +8,7 @@
 #include "core/types.hpp"
 #include "core/identity/identity.hpp"
 #include "core/certificate/certificate.hpp"
+#include "core/transport/secure_session.hpp"
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -349,11 +350,11 @@ Result<void> run_join_command(const std::string& token_str,
         if (!r) return r.error();
         save_join_state(fsm, actual_data_dir);
 
-        // ── Send TCP/CBOR ───────────────────────────────────────────
+        // ── Send TCP/CBOR (secure, with PQ handshake) ──────────────
         std::string last_error;
         bool sent = false;
 
-        std::printf("Attempting to join mesh via TCP/CBOR...\n");
+        std::printf("Attempting to join mesh via secure TCP/CBOR (PQ handshake)...\n");
 
         for (const auto& endpoint : token.bootstrap_endpoints) {
             size_t colon = endpoint.rfind(':');
@@ -370,14 +371,33 @@ Result<void> run_join_command(const std::string& token_str,
                 continue;
             }
 
-            auto resp_result = tcp_cbor_exchange(fd, BytesView(req_cbor));
-            if (!resp_result) {
-                std::printf("FAIL (%s)\n", resp_result.error().message.c_str());
-                last_error = resp_result.error().message;
+            // ── PQ handshake ──────────────────────────────────────
+            SecureSession::Config sec_cfg;
+            sec_cfg.role = SecureSession::Role::Client;
+            SecureSession sec(fd, sec_cfg, *crypto);
+            auto hs = sec.handshake();
+            if (!hs) {
+                std::printf("FAIL (handshake: %s)\n", hs.error().message.c_str());
+                last_error = hs.error().message;
                 continue;
             }
 
-            auto decode_result = join::JoinResponse::decode_cbor(BytesView(resp_result.value()));
+            // ── Send encrypted JoinRequest, receive encrypted response ──
+            auto send_res = sec.send(BytesView(req_cbor));
+            if (!send_res) {
+                std::printf("FAIL (send: %s)\n", send_res.error().message.c_str());
+                last_error = send_res.error().message;
+                continue;
+            }
+
+            auto enc_resp = sec.recv();
+            if (!enc_resp) {
+                std::printf("FAIL (recv: %s)\n", enc_resp.error().message.c_str());
+                last_error = enc_resp.error().message;
+                continue;
+            }
+
+            auto decode_result = join::JoinResponse::decode_cbor(BytesView(enc_resp.value()));
             if (!decode_result) {
                 std::printf("FAIL (invalid response: %s)\n", decode_result.error().message.c_str());
                 last_error = "Invalid CBOR response";
@@ -386,7 +406,7 @@ Result<void> run_join_command(const std::string& token_str,
 
             resp = std::move(decode_result.value());
             sent = true;
-            std::printf("OK\n");
+            std::printf("OK (PQ-secure)\n");
             break;
         }
 
@@ -466,7 +486,8 @@ Result<void> run_join_command(const std::string& token_str,
     }
 
     // ── Step: Bootstrap sync ───────────────────────────────────────
-    if (current_state() == join::JoinState::CERT_VERIFY) {
+    if (current_state() >= join::JoinState::CERT_VERIFY &&
+        current_state() <= join::JoinState::BOOTSTRAP_SYNC) {
         std::printf("Requesting bootstrap sync...\n");
 
         // Build BootstrapSyncRequest with known epochs from response
@@ -476,15 +497,134 @@ Result<void> run_join_command(const std::string& token_str,
         sync_req.manifest_epoch = resp.manifest_epoch;
         // crl_epoch, membership_epoch, policy_version default to 0 (full sync)
 
-        auto r = fsm.on_event(static_cast<int64_t>(join::JoinEvent::SYNC_REQUESTED));
-        if (!r) return r.error();
-        save_join_state(fsm, actual_data_dir);
+        if (current_state() == join::JoinState::CERT_VERIFY) {
+            auto r = fsm.on_event(static_cast<int64_t>(join::JoinEvent::SYNC_REQUESTED));
+            if (!r) return r.error();
+            save_join_state(fsm, actual_data_dir);
+        }
 
-        // TODO: send BootstrapSyncRequest via TCP/CBOR to bootstrap nodes
-        // and process BootstrapSyncResponse.
-        // For now, mark sync complete immediately (Phase 3 will implement this).
-        std::printf("  Bootstrap sync requested (epoch: %llu)\n",
-                    (unsigned long long)resp.manifest_epoch);
+        // Get bootstrap endpoints from JoinResponse or token
+        auto& endpoints = !resp.bootstrap_nodes.empty()
+            ? resp.bootstrap_nodes
+            : token.bootstrap_endpoints;
+
+        bool synced = false;
+        std::string last_error;
+        std::printf("  Bootstrap sync via secure TCP/CBOR (epoch: %llu)...\n",
+                    (unsigned long long)sync_req.manifest_epoch);
+
+        // Try each bootstrap endpoint until one works
+        for (const auto& endpoint : endpoints) {
+            size_t colon = endpoint.rfind(':');
+            if (colon == std::string::npos) continue;
+            std::string host = endpoint.substr(0, colon);
+            uint16_t ep_port = static_cast<uint16_t>(std::stoi(endpoint.substr(colon + 1)));
+
+            std::printf("    Trying endpoint: %s:%u ... ", host.c_str(), ep_port);
+
+            int fd = tcp_connect(host, ep_port);
+            if (fd < 0) {
+                std::printf("FAIL (connection refused)\n");
+                last_error = "Connection refused: " + host + ":" + std::to_string(ep_port);
+                continue;
+            }
+
+            // ── PQ handshake ──────────────────────────────────────
+            SecureSession::Config sec_cfg;
+            sec_cfg.role = SecureSession::Role::Client;
+            SecureSession sec(fd, sec_cfg, *crypto);
+            auto hs = sec.handshake();
+            if (!hs) {
+                std::printf("FAIL (handshake: %s)\n", hs.error().message.c_str());
+                last_error = hs.error().message;
+                continue;
+            }
+
+            Bytes req_cbor = sync_req.encode_cbor();
+            auto send_res = sec.send(BytesView(req_cbor));
+            if (!send_res) {
+                std::printf("FAIL (send: %s)\n", send_res.error().message.c_str());
+                last_error = send_res.error().message;
+                continue;
+            }
+
+            auto enc_resp = sec.recv();
+            if (!enc_resp) {
+                std::printf("FAIL (recv: %s)\n", enc_resp.error().message.c_str());
+                last_error = enc_resp.error().message;
+                continue;
+            }
+
+            auto decode_result = join::BootstrapSyncResponse::decode_cbor(
+                BytesView(enc_resp.value()));
+            if (!decode_result) {
+                std::printf("FAIL (invalid response: %s)\n",
+                            decode_result.error().message.c_str());
+                last_error = "Invalid CBOR response";
+                continue;
+            }
+
+            const auto& sync_resp = decode_result.value();
+            std::printf("OK (mf=%llu mem=%llu crl=%llu pol=%llu)\n",
+                        (unsigned long long)sync_resp.manifest_epoch,
+                        (unsigned long long)sync_resp.membership_epoch,
+                        (unsigned long long)sync_resp.crl_epoch,
+                        (unsigned long long)sync_resp.policy_version);
+
+            // Apply deltas
+            if (!sync_resp.manifest_delta.empty()) {
+                std::string mf_path = actual_data_dir + "/manifest_delta.cbor";
+                std::ofstream mf_f(mf_path, std::ios::binary);
+                if (mf_f) {
+                    mf_f.write(reinterpret_cast<const char*>(
+                        sync_resp.manifest_delta.data()), sync_resp.manifest_delta.size());
+                }
+                std::printf("    manifest delta: %zu bytes\n",
+                            sync_resp.manifest_delta.size());
+            }
+
+            if (!sync_resp.membership_delta.empty()) {
+                std::string mem_path = actual_data_dir + "/membership_delta.cbor";
+                std::ofstream mem_f(mem_path, std::ios::binary);
+                if (mem_f) {
+                    mem_f.write(reinterpret_cast<const char*>(
+                        sync_resp.membership_delta.data()), sync_resp.membership_delta.size());
+                }
+                std::printf("    membership delta: %zu nodes\n",
+                            sync_resp.membership_delta.size());
+            }
+
+            if (!sync_resp.crl_delta.empty()) {
+                std::string crl_path = actual_data_dir + "/crl_delta.cbor";
+                std::ofstream crl_f(crl_path, std::ios::binary);
+                if (crl_f) {
+                    crl_f.write(reinterpret_cast<const char*>(
+                        sync_resp.crl_delta.data()), sync_resp.crl_delta.size());
+                }
+                std::printf("    crl delta: %zu entries\n",
+                            sync_resp.crl_delta.size());
+            }
+
+            if (!sync_resp.policy_delta.empty()) {
+                std::string pol_path = actual_data_dir + "/policy_delta.cbor";
+                std::ofstream pol_f(pol_path, std::ios::binary);
+                if (pol_f) {
+                    pol_f.write(reinterpret_cast<const char*>(
+                        sync_resp.policy_delta.data()), sync_resp.policy_delta.size());
+                }
+                std::printf("    policy delta: %zu bytes\n",
+                            sync_resp.policy_delta.size());
+            }
+
+            synced = true;
+            break;
+        }
+
+        if (!synced) {
+            return SMO_ERR_CERT(220, Error, RetrySafe, None,
+                                "All bootstrap endpoints unreachable for sync. "
+                                "Last error: " + last_error);
+        }
 
         auto r2 = fsm.on_event(static_cast<int64_t>(join::JoinEvent::SYNC_COMPLETE));
         if (!r2) return r2.error();

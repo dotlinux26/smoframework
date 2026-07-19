@@ -49,6 +49,7 @@ private:
     Result<ContractResult> handle_snapshot(const ContractInput& input, const RuntimeContext& ctx);
     Result<ContractResult> handle_request(const ContractInput& input, const RuntimeContext& ctx);
     Result<ContractResult> handle_info(const ContractInput& input, const RuntimeContext& ctx);
+    Result<ContractResult> handle_bootstrap_sync(const ContractInput& input, const RuntimeContext& ctx);
 };
 
 } // namespace smo::runtime

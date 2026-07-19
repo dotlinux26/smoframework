@@ -102,6 +102,7 @@ const CryptoProvider& get_suite2_modern_provider() noexcept {
             .decrypt = xchacha20_decrypt_fn,
         },
         .kem = KemImpl{
+            .generate_keypair = x25519_gen,
             .encapsulate = x25519_encap,
             .decapsulate = x25519_decap,
         },

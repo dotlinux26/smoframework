@@ -57,9 +57,10 @@ struct AeadImpl {
 // KemImpl — function-pointer table for KEM encapsulate/decapsulate
 // ---------------------------------------------------------------------------
 struct KemImpl {
-    Result<EncapsResult> (*encapsulate)(BytesView pubkey, RngRef& rng) = nullptr;
-    Result<Bytes>        (*decapsulate)(BytesView privkey,
-                                        BytesView ciphertext)          = nullptr;
+    Result<KeypairResult> (*generate_keypair)(RngRef& rng)             = nullptr;
+    Result<EncapsResult>  (*encapsulate)(BytesView pubkey, RngRef& rng)= nullptr;
+    Result<Bytes>         (*decapsulate)(BytesView privkey,
+                                         BytesView ciphertext)         = nullptr;
 };
 
 // ---------------------------------------------------------------------------

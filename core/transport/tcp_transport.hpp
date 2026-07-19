@@ -21,6 +21,9 @@ public:
     Endpoint remote_endpoint() const override;
     bool is_open() const override;
 
+    int fd() const { return fd_; }
+    int release_fd() { int f = fd_; fd_ = -1; return f; }
+
 private:
     int fd_;
     Endpoint remote_;

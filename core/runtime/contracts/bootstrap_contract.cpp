@@ -2,6 +2,7 @@
 
 #include "core/bootstrap/bootstrap_protocol.hpp"
 #include "core/bootstrap/bootstrap_snapshot.hpp"
+#include "core/join/join_protocol.hpp"
 #include "core/mesh/mesh_manager.hpp"
 #include "core/authority/authority.hpp"
 #include "core/governance/governance.hpp"
@@ -21,7 +22,7 @@ ContractMetadata BootstrapContract::default_metadata() {
     meta.required_capabilities.set(static_cast<size_t>(ContractCapability::Network));
     meta.max_execution_time_ns = 15'000'000'000;  // 15s
     meta.tags = {"system", "bootstrap"};
-    meta.provides = {"snapshot", "request", "info"};
+    meta.provides = {"snapshot", "request", "info", "bootstrap_sync"};
     meta.entry_point = "system.bootstrap";
     meta.has_initialize = false;
     meta.has_shutdown = false;
@@ -51,6 +52,9 @@ Result<ContractResult> BootstrapContract::execute(
     }
     if (input.method == "info") {
         return handle_info(input, ctx);
+    }
+    if (input.method == "bootstrap_sync") {
+        return handle_bootstrap_sync(input, ctx);
     }
     return ContractResult::denied("unknown method: " + input.method);
 }
@@ -152,6 +156,131 @@ Result<ContractResult> BootstrapContract::handle_info(
         "methods": ["snapshot", "request", "info"],
         "capabilities": ["crypto", "network"]
     })";
+    return result;
+}
+
+// ── handle_bootstrap_sync ───────────────────────────────────────────
+// Delta sync for post-join bootstrap (opcode 0x0603/0x0604, per DISCUSSION_0039 §5.4)
+Result<ContractResult> BootstrapContract::handle_bootstrap_sync(
+    const ContractInput& input,
+    const RuntimeContext& ctx)
+{
+    (void)ctx;
+
+    auto cbor_res = input.arguments.get<Bytes>();
+    if (!cbor_res) {
+        return ContractResult::denied("missing bootstrap sync request CBOR data");
+    }
+
+    auto req_res = join::BootstrapSyncRequest::decode_cbor(BytesView(cbor_res.value()));
+    if (!req_res) {
+        return ContractResult::denied("invalid bootstrap sync request: " + req_res.error().message);
+    }
+    const auto& req = req_res.value();
+
+    // Get current mesh context for epoch comparison
+    auto mesh_res = mesh_mgr_.get_current_mesh();
+    if (!mesh_res) {
+        return ContractResult::denied("no active mesh for bootstrap sync");
+    }
+    auto& ctx_mesh = mesh_res.value();
+    auto& cfg = ctx_mesh->config;
+    uint64_t current_epoch = static_cast<uint64_t>(cfg.epoch);
+
+    join::BootstrapSyncResponse resp;
+    resp.nonce = req.nonce;
+
+    // Always send current epochs so joiner knows latest state
+    resp.manifest_epoch = current_epoch;
+
+    // ── Manifest delta ────────────────────────────────────────────
+    if (req.manifest_epoch < current_epoch) {
+        cbor::Encoder man_enc;
+        man_enc.encode_map(4);
+        man_enc.encode_uint(1); man_enc.encode_string(cfg.mesh_id);
+        man_enc.encode_uint(2); man_enc.encode_uint(current_epoch);
+        man_enc.encode_uint(3); man_enc.encode_string(cfg.display_name.empty() ? cfg.mesh_id : cfg.display_name);
+        man_enc.encode_uint(4);
+        man_enc.encode_array(cfg.bootstrap_endpoints.size());
+        for (auto& ep : cfg.bootstrap_endpoints) {
+            man_enc.encode_string(ep);
+        }
+        resp.manifest_delta = man_enc.take();
+    }
+
+    // ── Membership delta ──────────────────────────────────────────
+    uint64_t membership_epoch = current_epoch;
+    resp.membership_epoch = membership_epoch;
+    if (req.membership_epoch < membership_epoch) {
+        auto nodes_res = authority_.registry().list_nodes(cfg.mesh_id);
+        if (nodes_res) {
+            cbor::Encoder mem_enc;
+            auto& nodes = nodes_res.value();
+            mem_enc.encode_array(nodes.size());
+            for (auto& node : nodes) {
+                mem_enc.encode_map(5);
+                mem_enc.encode_uint(1); mem_enc.encode_string(node.node_id_hex);
+                mem_enc.encode_uint(2); mem_enc.encode_string(node.role);
+                mem_enc.encode_uint(3); mem_enc.encode_string(node.status);
+                mem_enc.encode_uint(4); mem_enc.encode_uint(node.epoch);
+                mem_enc.encode_uint(5); mem_enc.encode_int(node.last_seen);
+            }
+            resp.membership_delta = mem_enc.take();
+        }
+    }
+
+    // ── CRL delta ─────────────────────────────────────────────────
+    uint64_t crl_epoch = current_epoch;
+    resp.crl_epoch = crl_epoch;
+    if (crl_ && req.crl_epoch < crl_epoch) {
+        auto entries = crl_->entries_since(req.crl_epoch);
+        if (!entries.empty()) {
+            cbor::Encoder crl_enc;
+            crl_enc.encode_array(entries.size());
+            for (auto& entry : entries) {
+                crl_enc.encode_map(4);
+                crl_enc.encode_uint(1); crl_enc.encode_string(entry.cert_fingerprint);
+                crl_enc.encode_uint(2); crl_enc.encode_string(entry.node_id_hex);
+                crl_enc.encode_uint(3); crl_enc.encode_uint(entry.epoch);
+                crl_enc.encode_uint(4); crl_enc.encode_int(entry.revoked_at);
+            }
+            resp.crl_delta = crl_enc.take();
+        }
+    }
+
+    // ── Policy delta ──────────────────────────────────────────────
+    uint64_t policy_version = current_epoch;
+    resp.policy_version = policy_version;
+    if (req.policy_version < policy_version && governance_) {
+        auto pending = governance_->pending();
+        if (!pending.empty()) {
+            cbor::Encoder pol_enc;
+            pol_enc.encode_array(pending.size());
+            for (auto& prop : pending) {
+                pol_enc.encode_map(3);
+                pol_enc.encode_uint(1); pol_enc.encode_uint(prop.id.value);
+                pol_enc.encode_uint(2); pol_enc.encode_int(prop.created_at);
+                pol_enc.encode_uint(3); pol_enc.encode_uint(static_cast<uint64_t>(prop.tier));
+            }
+            resp.policy_delta = pol_enc.take();
+        }
+    }
+
+    // Serialize and return
+    Bytes response_cbor = resp.encode_cbor();
+
+    ContractResult result = ContractResult::ok();
+    result.data = "bootstrap sync response";
+    result.binary = std::move(response_cbor);
+    result.metrics["manifest_epoch"] = ContextValue(static_cast<int64_t>(resp.manifest_epoch));
+    result.metrics["membership_epoch"] = ContextValue(static_cast<int64_t>(resp.membership_epoch));
+    result.metrics["crl_epoch"] = ContextValue(static_cast<int64_t>(resp.crl_epoch));
+    result.metrics["policy_version"] = ContextValue(static_cast<int64_t>(resp.policy_version));
+
+    result.next_actions.push_back(
+        emit_event("bootstrap.sync_delivered",
+                    "manifest_epoch=" + std::to_string(resp.manifest_epoch)));
+
     return result;
 }
 

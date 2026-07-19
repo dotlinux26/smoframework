@@ -4,11 +4,16 @@
 #include "core/opcode/opcode.h"
 #include "core/crypto/suite.hpp"
 #include "core/crypto/impl.hpp"
+#include "core/crypto/registry.hpp"
 #include "core/enroll/join_token.hpp"
 #include "core/errors/error.hpp"
+#include "core/authority/authority.hpp"
+#include "core/recovery/crl.hpp"
+#include "core/certificate/certificate.hpp"
 
 #include <random>
 #include <chrono>
+#include <cstring>
 
 namespace smo::join {
 
@@ -363,6 +368,209 @@ std::vector<smo::StateTimeout> join_timeout_table() {
         {static_cast<int64_t>(WAIT_SYNC),      30'000'000'000ULL,  static_cast<int64_t>(FAILED)},  // 30s
         {static_cast<int64_t>(WAIT_GOSSIP),    60'000'000'000ULL,  static_cast<int64_t>(FAILED)},  // 60s
     };
+}
+
+namespace {
+    Bytes hex_to_bytes(const std::string& hex) {
+        Bytes out;
+        out.reserve(hex.size() / 2);
+        for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+            char buf[3] = {hex[i], hex[i+1], 0};
+            out.push_back(static_cast<uint8_t>(std::strtoul(buf, nullptr, 16)));
+        }
+        return out;
+    }
+}
+
+// ── process_join_request ────────────────────────────────────────────
+// Server-side: validates JoinRequest → issues cert → returns JoinResponse
+
+Result<JoinResponse> process_join_request(
+    const JoinRequest& req,
+    MeshManager& mesh_mgr,
+    authority::MeshAuthority& authority)
+{
+    // 1. Parse token
+    auto token_result = enroll::parse_token(req.token);
+    if (!token_result) {
+        return SMO_ERR_CERT(213, Error, NoRetry, None,
+                            "Invalid join token: " + token_result.error().message);
+    }
+    const auto& token = token_result.value();
+
+    // 2. Verify timestamp (±30s window)
+    auto now_sec = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    if (std::llabs(now_sec - req.timestamp) > 30) {
+        return SMO_ERR_CERT(214, Error, NoRetry, None,
+                            "JoinRequest timestamp outside ±30s window");
+    }
+
+    // 3. Check token expiry
+    if (token.expiry_unix_sec > 0 && now_sec > token.expiry_unix_sec) {
+        return SMO_ERR_CERT(213, Error, NoRetry, None, "Join token expired");
+    }
+
+    // 4. Verify request_signature: sign(token || timestamp || nonce || csr_hash)
+    auto& reg = CryptoRegistry::instance();
+    auto crypto_result = reg.get_suite(token.cipher_suite_id);
+    if (!crypto_result) return crypto_result.error();
+    const auto* crypto = crypto_result.value();
+
+    {
+        Bytes sig_check;
+        sig_check.insert(sig_check.end(), req.token.begin(), req.token.end());
+        sig_check.push_back(static_cast<uint8_t>((req.timestamp >> 56) & 0xFF));
+        sig_check.push_back(static_cast<uint8_t>((req.timestamp >> 48) & 0xFF));
+        sig_check.push_back(static_cast<uint8_t>((req.timestamp >> 40) & 0xFF));
+        sig_check.push_back(static_cast<uint8_t>((req.timestamp >> 32) & 0xFF));
+        sig_check.push_back(static_cast<uint8_t>((req.timestamp >> 24) & 0xFF));
+        sig_check.push_back(static_cast<uint8_t>((req.timestamp >> 16) & 0xFF));
+        sig_check.push_back(static_cast<uint8_t>((req.timestamp >> 8) & 0xFF));
+        sig_check.push_back(static_cast<uint8_t>(req.timestamp & 0xFF));
+        sig_check.insert(sig_check.end(), req.nonce.begin(), req.nonce.end());
+        sig_check.insert(sig_check.end(), req.csr_hash.begin(), req.csr_hash.end());
+
+        // Extract issuer public key from token issuer field
+        // Format: "root:<fingerprint>" or "authority:<fingerprint>"
+        auto delim = token.issuer.find(':');
+        if (delim == std::string::npos) {
+            return SMO_ERR_CERT(215, Error, NoRetry, None, "Invalid issuer field");
+        }
+        std::string issuer_pubkey_hex = token.issuer.substr(delim + 1);
+        Bytes issuer_pubkey = hex_to_bytes(issuer_pubkey_hex);
+
+        auto verify_res = crypto->signer.verify(
+            BytesView(sig_check), BytesView(req.request_signature),
+            BytesView(issuer_pubkey));
+        if (!verify_res || !verify_res.value()) {
+            return SMO_ERR_CERT(216, Error, NoRetry, None,
+                                "JoinRequest signature verification failed");
+        }
+    }
+
+    // 5. Parse CSR and sign certificate
+    Bytes csr_bytes = hex_to_bytes(req.csr_pem);
+    auto csr_result = CertificateSigningRequest::deserialize(BytesView(csr_bytes));
+    if (!csr_result) {
+        return SMO_ERR_CERT(217, Error, NoRetry, None,
+                            "Invalid CSR: " + csr_result.error().message);
+    }
+
+    // 6. Issue certificate via Authority
+    auto cert_result = authority.sign_csr(BytesView(csr_bytes), token.mesh_id);
+    if (!cert_result) {
+        return SMO_ERR_CERT(218, Error, NoRetry, None,
+                            "Failed to issue certificate: " + cert_result.error().message);
+    }
+
+    // 7. Register node in registry
+    const auto& cert = cert_result.value();
+    auto hash_res = cert.cert_hash(crypto->hash);
+    std::string fp = hash_res ? bytes_to_hex(hash_res.value()) : "unknown";
+
+    authority::NodeRecord node_rec;
+    node_rec.node_id_hex = bytes_to_hex(cert.subject_pubkey);
+    node_rec.mesh_id = token.mesh_id;
+    node_rec.role = token.admission.role;
+    node_rec.status = "active";
+    node_rec.epoch = static_cast<uint64_t>(cert.epoch);
+    node_rec.last_seen = now_sec;
+    node_rec.cert_fingerprint = fp;
+    (void)authority.registry().register_node(node_rec);
+
+    // 8. Build JoinResponse
+    JoinResponse resp;
+    resp.nonce = req.nonce;
+    resp.certificate_pem = bytes_to_hex(cert.serialize_full());
+    resp.mesh_id = token.mesh_id;
+    resp.manifest_epoch = 1;
+
+    // Get current mesh for bootstrap nodes
+    auto mesh_res = mesh_mgr.get_mesh(token.mesh_id);
+    if (mesh_res) {
+        resp.bootstrap_nodes = mesh_res.value()->config.bootstrap_endpoints;
+    }
+
+    return resp;
+}
+
+// ── process_bootstrap_sync ───────────────────────────────────────────
+// Server-side: epoch-based delta sync for post-join bootstrap
+
+Result<BootstrapSyncResponse> process_bootstrap_sync(
+    const BootstrapSyncRequest& req,
+    MeshManager& mesh_mgr,
+    authority::MeshAuthority& authority,
+    recovery::CRL* crl)
+{
+    auto mesh_res = mesh_mgr.get_current_mesh();
+    if (!mesh_res) {
+        return SMO_ERR_PROTOCOL(900, Error, NoRetry, None,
+                                "No active mesh for bootstrap sync");
+    }
+    auto& ctx = mesh_res.value();
+    auto& cfg = ctx->config;
+    uint64_t current_epoch = static_cast<uint64_t>(cfg.epoch);
+
+    BootstrapSyncResponse resp;
+    resp.nonce = req.nonce;
+    resp.manifest_epoch = current_epoch;
+
+    // Manifest delta
+    if (req.manifest_epoch < current_epoch) {
+        cbor::Encoder enc;
+        enc.encode_map(4);
+        enc.encode_uint(1); enc.encode_string(cfg.mesh_id);
+        enc.encode_uint(2); enc.encode_uint(current_epoch);
+        enc.encode_uint(3); enc.encode_string(cfg.display_name.empty() ? cfg.mesh_id : cfg.display_name);
+        enc.encode_uint(4);
+        enc.encode_array(cfg.bootstrap_endpoints.size());
+        for (auto& ep : cfg.bootstrap_endpoints) enc.encode_string(ep);
+        resp.manifest_delta = enc.take();
+    }
+
+    // Membership delta
+    resp.membership_epoch = current_epoch;
+    if (req.membership_epoch < current_epoch) {
+        auto nodes = authority.registry().list_nodes(cfg.mesh_id);
+        if (nodes && !nodes.value().empty()) {
+            cbor::Encoder enc;
+            enc.encode_array(nodes.value().size());
+            for (auto& n : nodes.value()) {
+                enc.encode_map(5);
+                enc.encode_uint(1); enc.encode_string(n.node_id_hex);
+                enc.encode_uint(2); enc.encode_string(n.role);
+                enc.encode_uint(3); enc.encode_string(n.status);
+                enc.encode_uint(4); enc.encode_uint(n.epoch);
+                enc.encode_uint(5); enc.encode_int(n.last_seen);
+            }
+            resp.membership_delta = enc.take();
+        }
+    }
+
+    // CRL delta
+    resp.crl_epoch = current_epoch;
+    if (crl && req.crl_epoch < current_epoch) {
+        auto entries = crl->entries_since(req.crl_epoch);
+        if (!entries.empty()) {
+            cbor::Encoder enc;
+            enc.encode_array(entries.size());
+            for (auto& e : entries) {
+                enc.encode_map(4);
+                enc.encode_uint(1); enc.encode_string(e.cert_fingerprint);
+                enc.encode_uint(2); enc.encode_string(e.node_id_hex);
+                enc.encode_uint(3); enc.encode_uint(e.epoch);
+                enc.encode_uint(4); enc.encode_int(e.revoked_at);
+            }
+            resp.crl_delta = enc.take();
+        }
+    }
+
+    // Policy delta — simple epoch-based for now
+    resp.policy_version = current_epoch;
+
+    return resp;
 }
 
 } // namespace smo::join

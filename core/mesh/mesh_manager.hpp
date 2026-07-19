@@ -15,6 +15,12 @@
 #include "core/crypto/impl.hpp"
 
 namespace smo {
+class GossipEngine;
+namespace join { class JoinService; }
+namespace bootstrap { class BootstrapService; }
+namespace sync { class SyncService; }
+namespace authority { class MeshAuthority; }
+namespace recovery { class CRL; }
 
 struct MeshConfig {
     std::string mesh_id;
@@ -113,9 +119,24 @@ public:
     // Load full MeshConfig from mesh.json (used by smo-admin)
     static Result<MeshConfig> load_mesh_config(const std::string& mesh_dir);
 
+    // Service injection (set by daemon after service construction)
+    void set_join_service(join::JoinService* svc);
+    void set_bootstrap_service(bootstrap::BootstrapService* svc);
+    void set_sync_service(sync::SyncService* svc);
+
+    // Access injected services
+    join::JoinService*       join_service()       { return join_service_; }
+    bootstrap::BootstrapService* bootstrap_service() { return bootstrap_service_; }
+    sync::SyncService*       sync_service()       { return sync_service_; }
+
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;
+
+    // Non-owning pointers to services (owned by daemon / node)
+    join::JoinService*             join_service_       = nullptr;
+    bootstrap::BootstrapService*   bootstrap_service_  = nullptr;
+    sync::SyncService*             sync_service_       = nullptr;
 };
 
 } // namespace smo

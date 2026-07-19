@@ -2,6 +2,9 @@
 
 #include "core/crypto/registry.hpp"
 #include "core/enroll/join_token.hpp"
+#include "core/join/join_service.hpp"
+#include "core/bootstrap/bootstrap_service.hpp"
+#include "core/network/sync/sync_service.hpp"
 
 #include <blake3.h>
 
@@ -413,18 +416,72 @@ Result<void> MeshManager::create_mesh(const MeshConfig& config, const std::strin
 }
 
 Result<void> MeshManager::delete_mesh(const std::string& mesh_id) {
-    (void)mesh_id;
-    return SMO_ERR_STORAGE(905, Error, NoRetry, None, "Not implemented");
+    auto ctx = impl_->get_mesh(mesh_id);
+    if (!ctx) return ctx.error();
+
+    // Stop sync service for this mesh if active
+    if (sync_service_) sync_service_->stop();
+
+    // Flush catalog entry
+    std::string sql = "DELETE FROM meshes WHERE mesh_id = ?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(impl_->db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return SMO_ERR_STORAGE(905, Error, NoRetry, None, "Failed to prepare delete");
+    }
+    sqlite3_bind_text(stmt, 1, mesh_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    // Remove on-disk directory
+    auto paths = make_mesh_paths(impl_->config_.base_data_dir, mesh_id);
+    std::error_code ec;
+    std::filesystem::remove_all(paths.mesh_dir, ec);
+
+    return {};
 }
 
 Result<void> MeshManager::join_mesh(const std::string& mesh_id, const std::string& seed_address) {
-    (void)mesh_id; (void)seed_address;
-    return SMO_ERR_STORAGE(905, Error, NoRetry, None, "Not implemented");
+    auto ctx = impl_->get_mesh(mesh_id);
+    if (!ctx) return ctx.error();
+
+    // Phase 4: delegate to JoinService (handles TCP/CBOR JOIN_REQUEST flow)
+    if (join_service_) {
+        join_service_->initialize();
+    } else {
+        return SMO_ERR_STORAGE(905, Error, NoRetry, None,
+                               "JoinService not available");
+    }
+
+    // Post-join: delegate to BootstrapService for delta sync
+    if (bootstrap_service_) {
+        auto ctx_val = ctx.value();
+        join::BootstrapSyncRequest req;
+        req.mesh_id = ctx_val->config.mesh_id;
+        req.node_id = "";  // filled by JoinService after cert received
+        auto sync_res = bootstrap_service_->handle_sync(req);
+        if (!sync_res) return sync_res.error();
+        (void)seed_address;
+    }
+
+    // Mark mesh as current after successful join
+    impl_->current_mesh_id_ = mesh_id;
+
+    return {};
 }
 
 Result<void> MeshManager::leave_mesh(const std::string& mesh_id) {
-    (void)mesh_id;
-    return SMO_ERR_STORAGE(905, Error, NoRetry, None, "Not implemented");
+    auto ctx = impl_->get_mesh(mesh_id);
+    if (!ctx) return ctx.error();
+
+    // Stop sync for this mesh
+    if (sync_service_) sync_service_->stop();
+
+    // Clear current if leaving the active mesh
+    if (impl_->current_mesh_id_ == mesh_id) {
+        impl_->current_mesh_id_.clear();
+    }
+
+    return {};
 }
 
 Result<void> MeshManager::switch_mesh(const std::string& id_or_name) {
@@ -650,6 +707,21 @@ Result<MeshConfig> MeshManager::load_mesh_config(const std::string& mesh_dir) {
     }
 
     return cfg;
+}
+
+// ---------------------------------------------------------------------------
+// Service injection
+// ---------------------------------------------------------------------------
+void MeshManager::set_join_service(join::JoinService* svc) {
+    join_service_ = svc;
+}
+
+void MeshManager::set_bootstrap_service(bootstrap::BootstrapService* svc) {
+    bootstrap_service_ = svc;
+}
+
+void MeshManager::set_sync_service(sync::SyncService* svc) {
+    sync_service_ = svc;
 }
 
 } // namespace smo

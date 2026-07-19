@@ -7,6 +7,8 @@
 #include "core/enroll/join_token.hpp"
 #include "core/bootstrap/bootstrap_snapshot.hpp"
 #include "core/network/packet_dispatcher.hpp"
+#include "core/authority/authority.hpp"
+#include "core/recovery/crl.hpp"
 
 #include <cstdint>
 #include <vector>
@@ -166,18 +168,20 @@ std::vector<smo::StateTimeout> join_timeout_table();
 
 // ── Handler declarations ─────────────────────────────────────────────
 
-Result<void> handle_join_request(
+// Process a JoinRequest (raw CBOR protocol) — validates token, verifies
+// CSR, issues certificate, returns JoinResponse.
+Result<JoinResponse> process_join_request(
     const JoinRequest& req,
-    smo::MeshManager& mesh_mgr,
-    const std::string& home);
+    MeshManager& mesh_mgr,
+    authority::MeshAuthority& authority);
 
-Result<void> handle_bootstrap_sync(
+// Process a BootstrapSyncRequest — builds delta sync response from
+// current mesh state (manifest/membership/policy/CRL deltas).
+Result<BootstrapSyncResponse> process_bootstrap_sync(
     const BootstrapSyncRequest& req,
-    const std::string& home);
-
-void register_join_handler(
-    network::PacketDispatcher& dispatcher,
-    const std::string& home);
+    MeshManager& mesh_mgr,
+    authority::MeshAuthority& authority,
+    recovery::CRL* crl);
 
 } // namespace smo::join
 
