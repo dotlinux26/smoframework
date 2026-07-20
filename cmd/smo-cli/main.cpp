@@ -6,9 +6,13 @@
 #include "core/enroll/join_token.hpp"
 #include "core/enroll/auto_enroll.hpp"
 #include "core/mesh/mesh_resolver.hpp"
+#include "core/authority/authority.hpp"
 
 #include <providers/suite1_classical/suite1_classical_provider.hpp>
 #include <providers/suite3_purepqc/suite3_purepqc_provider.hpp>
+
+#include <core/crypto/registry.hpp>
+#include <core/crypto/suite.hpp>
 
 #include <iostream>
 #include <fstream>
@@ -574,29 +578,93 @@ private:
         if (intent.flags.count("create")) {
             std::string name = intent.flags.at("create");
             std::string mesh_dir = home + "/meshes/" + name;
-            bool is_new = std::filesystem::create_directories(mesh_dir);
+            std::filesystem::create_directories(mesh_dir);
 
-            // Write minimal mesh.json if not exists
             std::string mj = mesh_dir + "/mesh.json";
-            if (!std::filesystem::exists(mj)) {
-                std::ofstream f(mj);
-                if (f) {
-                    f << "{\n";
-                    f << "  \"mesh_id\": \"" << name << "\",\n";
-                    f << "  \"created_at\": " << std::chrono::duration_cast<std::chrono::seconds>(
-                        std::chrono::system_clock::now().time_since_epoch()).count() << ",\n";
-                    f << "  \"display_name\": \"" << name << "\"\n";
-                    f << "}\n";
+            if (std::filesystem::exists(mj)) {
+                std::cout << "Using existing mesh: " << name << "\n";
+                context_.set_mesh(name);
+                return 0;
+            }
+
+            // ── Key generation (Phase 8c: inline, no smo-admin) ──────
+            const auto* crypto = get_crypto(smo::kSuitePurePQC);
+            if (!crypto) {
+                std::cerr << "Error: failed to initialize crypto\n";
+                return 1;
+            }
+            auto rng = crypto->default_rng();
+
+            // Generate mesh_id from name + timestamp
+            int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            std::string canonical = name + "|" + std::to_string(now_ms);
+            auto hash_result = crypto->hash.hash(
+                BytesView(reinterpret_cast<const uint8_t*>(canonical.data()), canonical.size()));
+            if (!hash_result) {
+                std::cerr << "Error: mesh_id hash failed\n";
+                return 1;
+            }
+            std::string mesh_id = smo::bytes_to_hex(hash_result.value());
+
+            // Generate HMAC secret
+            std::random_device rd;
+            std::array<uint8_t, 32> hmac_raw{};
+            for (auto& b : hmac_raw) b = static_cast<uint8_t>(rd());
+            std::ostringstream hmac_oss;
+            for (uint8_t b : hmac_raw)
+                hmac_oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+            std::string hmac_secret = hmac_oss.str();
+
+            // Generate authority keys via MeshAuthority
+            smo::authority::MeshAuthority authority;
+            if (auto r = authority.init(*crypto, rng); !r) {
+                std::cerr << "Error: authority init failed: " << r.error().message << "\n";
+                return 1;
+            }
+
+            smo::authority::MeshAuthority::Config auth_cfg;
+            auth_cfg.mesh_id = mesh_id;
+            auth_cfg.data_dir = mesh_dir;
+            auth_cfg.registry_path = mesh_dir + "/node_registry.db";
+
+            std::string root_pubkey_hex;
+            if (auto r = authority.create_mesh_keys(auth_cfg, *crypto, rng, root_pubkey_hex); !r) {
+                std::cerr << "Error: create mesh keys failed: " << r.error().message << "\n";
+                return 1;
+            }
+
+            // Read authority public key from disk
+            std::string auth_pub_hex;
+            {
+                std::ifstream pkf(mesh_dir + "/authority.pub", std::ios::binary);
+                if (pkf) {
+                    smo::Bytes pk_bytes((std::istreambuf_iterator<char>(pkf)),
+                                         std::istreambuf_iterator<char>());
+                    auth_pub_hex = smo::bytes_to_hex(pk_bytes);
                 }
             }
 
-            context_.set_mesh(name);
-            if (is_new) {
-                std::cout << "Created and switched to mesh: " << name << "\n";
-                std::cout << "  Initialize keys: smo-admin --mesh " << name << " create-mesh\n";
-            } else {
-                std::cout << "Using existing mesh: " << name << "\n";
+            // Write full mesh.json
+            int64_t now_sec = now_ms / 1000;
+            {
+                std::ofstream f(mj);
+                f << "{\n";
+                f << "  \"mesh_id\": \"" << mesh_id << "\",\n";
+                f << "  \"display_name\": \"" << name << "\",\n";
+                f << "  \"authority_pubkey\": \"" << auth_pub_hex << "\",\n";
+                f << "  \"root_pubkey\": \"" << root_pubkey_hex << "\",\n";
+                f << "  \"hmac_secret\": \"" << hmac_secret << "\",\n";
+                f << "  \"cipher_suite_id\": " << static_cast<int>(smo::kSuitePurePQC) << ",\n";
+                f << "  \"epoch\": 1,\n";
+                f << "  \"created_at\": " << now_sec << "\n";
+                f << "}\n";
             }
+
+            context_.set_mesh(name);
+            std::cout << "Created and switched to mesh: " << name << "\n";
+            std::cout << "  Mesh ID: " << mesh_id.substr(0, 16) << "...\n";
+            std::cout << "  Keys generated: authority + root keypairs\n";
             return 0;
         }
         if (intent.flags.count("publish")) {
@@ -751,6 +819,18 @@ private:
             return 0;
         }
         return 0;
+    }
+
+    static const smo::CryptoProvider* get_crypto(smo::CryptoSuiteID sid) {
+        static bool crypto_initialized = false;
+        if (!crypto_initialized) {
+            smo::providers::register_suite1_classical();
+            smo::providers::register_suite3_purepqc();
+            crypto_initialized = true;
+        }
+        auto& reg = smo::CryptoRegistry::instance();
+        auto prov = reg.get_suite(sid);
+        return prov ? prov.value() : nullptr;
     }
 
     Result<int> handle_genesis(const Intent& intent) {

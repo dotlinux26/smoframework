@@ -714,14 +714,28 @@ Result<JoinResult> run_join_command(const std::string& token_str,
         save_join_state(fsm, actual_data_dir);
     }
 
-    // ── Step: Gossip sync (placeholder) ─────────────────────────────
+    // ── Step: Gossip sync ──────────────────────────────────────────
+    // DISCUSSION_0039 §5.21: WAIT_SYNC → GOSSIP_STARTED → GOSSIP_SYNC →
+    // WAIT_GOSSIP → GOSSIP_COMPLETE → READY
+    //
+    // In the CLI join command there is no daemon/GossipEngine running,
+    // so we advance through all gossip states to READY.
+    // The daemon (smo-node) will resume from READY and start its own
+    // GossipEngine; actual gossip readiness verification is the daemon's
+    // responsibility (future: add gossip health check in daemon main loop).
     if (current_state() == join::JoinState::WAIT_SYNC) {
         auto r = fsm.on_event(static_cast<int64_t>(join::JoinEvent::GOSSIP_STARTED));
         if (!r) return r.error();
         save_join_state(fsm, actual_data_dir);
 
+        // GOSSIP_SYNC (9) → WAIT_GOSSIP (10)
         auto r2 = fsm.on_event(static_cast<int64_t>(join::JoinEvent::GOSSIP_COMPLETE));
         if (!r2) return r2.error();
+        save_join_state(fsm, actual_data_dir);
+
+        // WAIT_GOSSIP (10) → READY (11)
+        auto r3 = fsm.on_event(static_cast<int64_t>(join::JoinEvent::GOSSIP_COMPLETE));
+        if (!r3) return r3.error();
         save_join_state(fsm, actual_data_dir);
     }
 
