@@ -237,4 +237,4 @@ See [DISCUSSION_0041](docs/discussions/DISCUSSION_0041_v0.0.2_Plan.md) for the v
 
 Apache 2.0 — see [LICENSE](LICENSE).
 
-Copyright (c) 2026 Nguyen Duc Canh / Distributed Offensive Technology Solutions Co., Ltd.
+Copyright (c) 2026 Nguyen Duc Canh / Distributed Offensive Technology Solutions.
